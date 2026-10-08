@@ -134,3 +134,36 @@ class TestCarryRenamedNets:
 
         assert iface._carry_renamed_nets(board, {"OLD": {"NEW"}}, {"NEW"}) == {}
         track.SetNet.assert_not_called()
+
+
+@pytest.mark.unit
+def test_sync_records_disk_signature_of_its_own_save(tmp_path):
+    """sync saves the board itself; the follow-up auto-save must not see that
+    write as an external edit ("Auto-save refused ... changed externally")."""
+    board_path = tmp_path / "b.kicad_pcb"
+    board_path.write_text("(kicad_pcb old)\n")
+    sch_path = tmp_path / "b.kicad_sch"
+    sch_path.write_text("(kicad_sch)\n")
+
+    board = MagicMock()
+    board.GetFileName.return_value = str(board_path)
+    board.GetFootprints.return_value = []
+    board.Save.side_effect = lambda p: Path(p).write_text("(kicad_pcb synced)\n")
+
+    iface = _interface()
+    iface._board_disk_signature = iface._disk_signature(str(board_path))
+    with (
+        patch.object(iface.__class__, "_safe_load_board", return_value=board),
+        patch.object(iface.__class__, "_cli_pad_net_map", return_value=({}, set())),
+        patch.object(
+            iface.__class__, "_add_missing_footprints_from_schematic", return_value=([], [])
+        ),
+        patch.object(iface.__class__, "_is_board_healthy", return_value=True),
+        patch("utils.sheet_tree.sheet_tree", return_value=[sch_path]),
+    ):
+        result = iface._handle_sync_schematic_to_board(
+            {"schematicPath": str(sch_path), "boardPath": str(board_path)}
+        )
+
+    assert result["success"] is True, result
+    assert iface._board_disk_signature == iface._disk_signature(str(board_path))

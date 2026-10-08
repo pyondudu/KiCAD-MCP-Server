@@ -3228,6 +3228,11 @@ class SchematicHandlersMixin:
             if params.get("boardPath"):
                 self.board = board
                 self._update_command_handlers()
+            # We just wrote the session board ourselves: record its new disk
+            # signature, or the auto-save that follows this mutating command
+            # mistakes our own write for an external edit and refuses to save.
+            if board is self.board and hasattr(self, "_record_board_signature"):
+                self._record_board_signature()
 
             logger.info(
                 f"sync_schematic_to_board: {len(added_nets)} nets added, "
