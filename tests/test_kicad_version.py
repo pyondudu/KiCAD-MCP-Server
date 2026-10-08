@@ -149,3 +149,44 @@ def test_run_erc_reports_diagnosis(monkeypatch, tmp_path):
     assert "Failed to load schematic" in result["errorDetails"]
     assert "20260101" in result["diagnosis"]
     assert result["message"].startswith("ERC failed:")
+
+
+def test_validator_uses_netlist_load_check_on_kicad9(monkeypatch, tmp_path):
+    """KiCad 9's kicad-cli has no `sch upgrade`; every schematic was 'rejected'."""
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "9")
+    from commands import validate_kicad_files as vkf
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    target = tmp_path / "a.kicad_sch"
+    target.write_text("(kicad_sch (version 20250114))\n", encoding="utf-8")
+    with (
+        patch.object(vkf, "resolve_kicad_cli", return_value="/usr/bin/kicad-cli"),
+        patch.object(vkf.subprocess, "run", fake_run),
+    ):
+        result = vkf._cli_check("sch", tmp_path, target)
+
+    assert result["ok"] is True
+    assert calls[0][1:4] == ["sch", "export", "netlist"]
+    assert "upgrade" not in calls[0]
+
+
+def test_validator_keeps_upgrade_on_kicad10(monkeypatch, tmp_path):
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "10")
+    from commands import validate_kicad_files as vkf
+
+    calls = []
+    with (
+        patch.object(vkf, "resolve_kicad_cli", return_value="/usr/bin/kicad-cli"),
+        patch.object(
+            vkf.subprocess,
+            "run",
+            lambda cmd, **kw: calls.append(cmd) or MagicMock(returncode=0, stdout="", stderr=""),
+        ),
+    ):
+        vkf._cli_check("sch", tmp_path, tmp_path / "a.kicad_sch")
+    assert calls[0][1:3] == ["sch", "upgrade"]

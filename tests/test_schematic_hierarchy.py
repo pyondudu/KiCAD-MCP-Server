@@ -395,11 +395,15 @@ class TestSheetProperties:
         if _shutil.which("kicad-cli") is None:
             _pytest.skip("kicad-cli not available")
 
+        from utils.kicad_version import apply_sch_format
+
         template = Path(__file__).parent.parent / "python" / "templates" / "blank.kicad_sch"
+        # Header for the installed KiCad, as create_schematic writes it.
+        blank = apply_sch_format(template.read_text(encoding="utf-8"))
         parent = tmp_path / "top.kicad_sch"
-        parent.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+        parent.write_text(blank, encoding="utf-8")
         sub = tmp_path / "sub.kicad_sch"
-        sub.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+        sub.write_text(blank, encoding="utf-8")
 
         c = _cmds()
         assert c.add_hierarchical_sheet(

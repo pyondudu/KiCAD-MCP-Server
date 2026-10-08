@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.kicad_cli import resolve_kicad_cli
+from utils.kicad_version import diagnose_sch_load_failure, kicad_major_version
 
 logger = logging.getLogger("kicad_interface")
 
@@ -376,9 +377,24 @@ def _cli_check(subcommand: str, work_dir: Path, target: Path) -> Dict[str, Any]:
     cli = resolve_kicad_cli()
     if not cli:
         return {"ran": False, "reason": "kicad-cli not found"}
+    cmd = [cli, subcommand, "upgrade", str(target)]
+    major = kicad_major_version()
+    if subcommand == "sch" and major is not None and major < 10:
+        # KiCad 9's kicad-cli has no `sch upgrade` (only erc/export), so every
+        # schematic was reported "rejected". A netlist export loads the file
+        # just the same and writes nothing next to it.
+        cmd = [
+            cli,
+            "sch",
+            "export",
+            "netlist",
+            "--output",
+            str(work_dir / "check.net"),
+            str(target),
+        ]
     try:
         proc = subprocess.run(
-            [cli, subcommand, "upgrade", str(target)],
+            cmd,
             cwd=str(work_dir),
             capture_output=True,
             text=True,
@@ -390,6 +406,10 @@ def _cli_check(subcommand: str, work_dir: Path, target: Path) -> Dict[str, Any]:
         return {"ran": False, "reason": f"kicad-cli could not be executed: {exc}"}
 
     output = (proc.stdout + proc.stderr).strip()
+    if proc.returncode != 0 and subcommand == "sch":
+        diagnosis = diagnose_sch_load_failure(str(target))
+        if diagnosis:
+            output = f"{output}\n{diagnosis}".strip()
     return {
         "ran": True,
         "ok": proc.returncode == 0,
