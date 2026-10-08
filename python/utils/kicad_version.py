@@ -37,8 +37,10 @@ _UNSET = object()
 _cached_major: object = _UNSET
 
 
-def _parse_major(text: str) -> Optional[int]:
-    m = re.search(r"(\d+)\.\d+", text or "")
+def _parse_major(text: object) -> Optional[int]:
+    if not isinstance(text, str):
+        return None
+    m = re.search(r"(\d+)\.\d+", text)
     return int(m.group(1)) if m else None
 
 
@@ -106,3 +108,46 @@ def reset_cache() -> None:
     """Forget the detected version (primarily for tests)."""
     global _cached_major
     _cached_major = _UNSET
+
+
+#: Tokens only KiCad 10 understands inside a placed symbol (see
+#: dynamic_symbol_loader._KICAD10_SCH_VERSION).
+_KICAD10_ONLY_TOKENS = ("(body_style ", "(in_pos_files ")
+
+
+def diagnose_sch_load_failure(path: str) -> Optional[str]:
+    """Explain why the installed KiCad cannot load ``path``, when we can tell.
+
+    kicad-cli reports only "Failed to load schematic". The common cause with
+    this server is a file in a newer format than the installed KiCad reads
+    (a KiCad 10 header or KiCad 10-only tokens under KiCad 9). Returns a
+    human-readable diagnosis with the fix, or ``None`` if nothing is found.
+    """
+    major = kicad_major_version()
+    if major is None or major >= _NEWEST:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+    except OSError:
+        return None
+
+    supported = SCH_FORMATS.get(major, SCH_FORMATS[min(SCH_FORMATS)])[0]
+    problems = []
+    m = re.search(r"\(version (\d+)\)", content)
+    if m and int(m.group(1)) > supported:
+        problems.append(
+            f"its format version {m.group(1)} is newer than KiCad {major} reads "
+            f"(max {supported})"
+        )
+    found = [t.strip("( ") for t in _KICAD10_ONLY_TOKENS if t in content]
+    if found:
+        problems.append("it contains KiCad 10-only tokens: " + ", ".join(found))
+    if not problems:
+        return None
+    return (
+        f"{path} cannot be loaded by the installed KiCad {major}: "
+        + "; ".join(problems)
+        + f". Set the header to (version {supported}) / generator_version "
+        f'"{major}.0" and remove the KiCad 10-only tokens, or open it with KiCad 10.'
+    )

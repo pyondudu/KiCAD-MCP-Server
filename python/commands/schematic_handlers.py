@@ -2827,12 +2827,21 @@ class SchematicHandlersMixin:
                 # produced (genuine CLI failure).
                 json_output_p = Path(json_output)
                 if not json_output_p.exists() or json_output_p.stat().st_size == 0:
-                    logger.error(f"ERC command produced no output: {result.stderr}")
-                    return {
+                    details = (result.stderr or result.stdout or "").strip()
+                    logger.error(f"ERC command produced no output: {details}")
+                    response = {
                         "success": False,
                         "message": "ERC command failed - no output produced",
-                        "errorDetails": result.stderr,
+                        "errorDetails": details,
                     }
+                    # kicad-cli only says "Failed to load schematic"; say why.
+                    from utils.kicad_version import diagnose_sch_load_failure
+
+                    diagnosis = diagnose_sch_load_failure(schematic_path)
+                    if diagnosis:
+                        response["message"] = "ERC failed: " + diagnosis
+                        response["diagnosis"] = diagnosis
+                    return response
 
                 with open(json_output, "r", encoding="utf-8") as f:
                     erc_data = json.load(f)
@@ -3375,9 +3384,12 @@ class SchematicHandlersMixin:
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0:
+                from utils.kicad_version import diagnose_sch_load_failure
+
                 logger.warning(
                     f"kicad-cli netlist export failed (exit {result.returncode}): "
-                    f"{(result.stderr or result.stdout).strip()}"
+                    f"{(result.stderr or result.stdout).strip()} "
+                    f"{diagnose_sch_load_failure(schematic_path) or ''}"
                 )
                 return None
             return ET.parse(tmp_path).getroot()

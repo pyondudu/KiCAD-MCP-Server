@@ -99,3 +99,53 @@ def test_create_schematic_writes_kicad9_header(monkeypatch, tmp_path):
     text = (tmp_path / "s.kicad_sch").read_text(encoding="utf-8")
     assert "(version 20250114)" in text
     assert "20260101" not in text
+
+
+KICAD10_SCH = (
+    '(kicad_sch (version 20260101) (generator "eeschema") (generator_version "10.0")\n'
+    '  (symbol (lib_id "Device:R") (body_style 1) (in_pos_files yes))\n)\n'
+)
+
+
+def test_diagnose_kicad10_file_under_kicad9(monkeypatch, tmp_path):
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "9")
+    sch = tmp_path / "a.kicad_sch"
+    sch.write_text(KICAD10_SCH, encoding="utf-8")
+    msg = kicad_version.diagnose_sch_load_failure(str(sch))
+    assert msg is not None
+    assert "20260101" in msg and "20250114" in msg
+    assert "body_style" in msg and "in_pos_files" in msg
+
+
+def test_diagnose_nothing_for_matching_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "9")
+    sch = tmp_path / "a.kicad_sch"
+    sch.write_text('(kicad_sch (version 20250114) (generator "eeschema"))\n', encoding="utf-8")
+    assert kicad_version.diagnose_sch_load_failure(str(sch)) is None
+
+
+def test_diagnose_nothing_under_kicad10(monkeypatch, tmp_path):
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "10")
+    sch = tmp_path / "a.kicad_sch"
+    sch.write_text(KICAD10_SCH, encoding="utf-8")
+    assert kicad_version.diagnose_sch_load_failure(str(sch)) is None
+
+
+def test_run_erc_reports_diagnosis(monkeypatch, tmp_path):
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "9")
+    sch = tmp_path / "a.kicad_sch"
+    sch.write_text(KICAD10_SCH, encoding="utf-8")
+
+    from kicad_interface import KiCADInterface
+
+    iface = KiCADInterface()
+    iface.design_rule_commands = MagicMock()
+    iface.design_rule_commands._find_kicad_cli.return_value = "/usr/bin/kicad-cli"
+    failed = MagicMock(returncode=3, stdout="Failed to load schematic\n", stderr="")
+    with patch("subprocess.run", return_value=failed):
+        result = iface._handle_run_erc({"schematicPath": str(sch)})
+
+    assert result["success"] is False
+    assert "Failed to load schematic" in result["errorDetails"]
+    assert "20260101" in result["diagnosis"]
+    assert result["message"].startswith("ERC failed:")
