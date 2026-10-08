@@ -404,6 +404,10 @@ class TestKicadCliRoundTrip:
         self.cli = _kicad_cli()
         if not self.cli:
             pytest.skip("kicad-cli not available")
+        from utils.kicad_version import kicad_major_version
+
+        if (kicad_major_version() or 10) < 10:
+            pytest.skip("`kicad-cli sch upgrade` needs KiCad 10")
         try:
             import sexpdata  # noqa: F401
         except ImportError:

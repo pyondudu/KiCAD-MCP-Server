@@ -169,6 +169,10 @@ def test_kicad_keeps_the_block_as_written(tmp_path: Path) -> None:
     cli = shutil.which("kicad-cli")
     if not cli:
         pytest.skip("kicad-cli not available")
+    from utils.kicad_version import kicad_major_version
+
+    if (kicad_major_version() or 10) < 10:
+        pytest.skip("`kicad-cli sch upgrade` needs KiCad 10")
     root = _project(tmp_path)
     r = _add(root, tmp_path / "power.kicad_sch")
     assert r["success"] is True
