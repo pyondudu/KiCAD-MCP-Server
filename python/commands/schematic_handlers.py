@@ -3155,11 +3155,25 @@ class SchematicHandlersMixin:
                     "message": f"Schematic not found. Provide schematicPath. Tried: {schematic_path}",
                 }
 
-            # Build the pad->net map from the sheets reachable from the root
+            # Build the pad->net map from the sheets reachable from the root.
+            # kicad-cli's netlist is authoritative: it names nets exactly as
+            # eeschema does ("/LED_A" for a sheet-local label, "+5V" for a
+            # power symbol, "Net-(D1-A)" for an unlabeled wire), so the board
+            # passes DRC schematic parity. The built-in walker is the fallback
+            # when kicad-cli is unavailable or cannot read the schematic.
             sheets_scanned: list = []
-            pad_net_map, net_names = self._build_hierarchical_pad_net_map(
-                schematic_path, sheets_out=sheets_scanned
-            )
+            cli_map = self._cli_pad_net_map(schematic_path)
+            if cli_map is not None:
+                pad_net_map, net_names = cli_map
+                net_source = "kicad-cli"
+                from utils.sheet_tree import sheet_tree
+
+                sheets_scanned.extend(str(p) for p in sheet_tree(Path(schematic_path)))
+            else:
+                pad_net_map, net_names = self._build_hierarchical_pad_net_map(
+                    schematic_path, sheets_out=sheets_scanned
+                )
+                net_source = "parser"
 
             # Add missing footprints from the schematic to the board *before*
             # we add nets and assign pads — F8 in KiCad does this implicitly
@@ -3187,6 +3201,8 @@ class SchematicHandlersMixin:
             # Assign nets to pads (now also covers any footprints we just added)
             assigned_pads = 0
             unmatched = []
+            # old net name -> new net names its pads moved to (for renames)
+            moved: Dict[str, set] = {}
             for fp in board.GetFootprints():
                 ref = fp.GetReference()
                 for pad in fp.Pads():
@@ -3195,10 +3211,15 @@ class SchematicHandlersMixin:
                     if key in pad_net_map:
                         net_name = pad_net_map[key]
                         if nets_by_name.has_key(net_name):
+                            old_name = pad.GetNetname()
+                            if old_name and old_name != net_name:
+                                moved.setdefault(old_name, set()).add(net_name)
                             pad.SetNet(nets_by_name[net_name])
                             assigned_pads += 1
                     else:
                         unmatched.append(f"{ref}/{pad_num}")
+
+            renamed_nets = self._carry_renamed_nets(board, moved, set(net_names))
 
             with preserve_project_settings(board_path):
                 board.Save(board_path)
@@ -3237,7 +3258,9 @@ class SchematicHandlersMixin:
                     f"{len(added_nets)} nets added, {assigned_pads} pads assigned"
                 ),
                 "sheets_scanned": sheet_names,
+                "net_source": net_source,
                 "nets_added": added_nets,
+                "nets_renamed": renamed_nets,
                 "nets_total": len(net_names),
                 "pads_assigned": assigned_pads,
                 "unmatched_pad_count": len(unmatched),
@@ -3257,12 +3280,70 @@ class SchematicHandlersMixin:
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
 
-    def _extract_components_from_schematic(self, schematic_path: str) -> List[Dict[str, str]]:
-        """Run kicad-cli netlist export and return the flat list of components.
+    def _cli_pad_net_map(
+        self, schematic_path: str
+    ) -> Optional[Tuple[Dict[Tuple[str, str], str], set]]:
+        """Pad->net map from kicad-cli's netlist, or None when it is unavailable.
 
-        Each entry: {"reference": str, "value": str, "footprint": str}
-        Empty list on any failure (kicad-cli missing, parse error, etc.) — the
-        caller treats that as "no missing footprints to add".
+        Returns ``({(ref, pin): net_name}, net_names)`` using eeschema's own net
+        names. Pins KiCad leaves unconnected get its ``unconnected-(...)`` nets,
+        exactly as Update PCB from Schematic (F8) assigns them.
+        """
+        root = self._export_netlist_xml(schematic_path)
+        if root is None:
+            return None
+        pad_net_map: Dict[Tuple[str, str], str] = {}
+        net_names: set = set()
+        for net in root.findall("./nets/net"):
+            name = net.get("name") or ""
+            if not name:
+                continue
+            for node in net.findall("node"):
+                ref, pin = node.get("ref"), node.get("pin")
+                if ref and pin is not None:
+                    pad_net_map[(ref, str(pin))] = name
+                    net_names.add(name)
+        if not pad_net_map:
+            return None
+        return pad_net_map, net_names
+
+    @staticmethod
+    def _carry_renamed_nets(board: Any, moved: Dict[str, set], live_names: set) -> Dict[str, str]:
+        """Carry tracks, vias and zones along when a net was renamed.
+
+        When every pad of an old net moved to the same new net and the old name
+        is gone from the schematic, the net was renamed (e.g. a label became a
+        power symbol). KiCad's F8 moves the copper with it; without this, the
+        routed copper keeps the stale net and DRC reports shorts. The emptied
+        old net is removed from the board. Returns ``{old: new}``.
+        """
+        if not moved:
+            return {}
+        still_used = {pad.GetNetname() for fp in board.GetFootprints() for pad in fp.Pads()}
+        nets_by_name = board.GetNetInfo().NetsByName()
+        renamed: Dict[str, str] = {}
+        for old, targets in moved.items():
+            if len(targets) != 1 or old in live_names or old in still_used:
+                continue
+            new = next(iter(targets))
+            if not nets_by_name.has_key(new):
+                continue
+            new_net = nets_by_name[new]
+            for item in list(board.GetTracks()) + list(board.Zones()):
+                if item.GetNetname() == old:
+                    item.SetNet(new_net)
+            if nets_by_name.has_key(old):
+                try:
+                    board.Remove(nets_by_name[old])
+                except Exception as e:  # stale empty net is harmless
+                    logger.debug(f"could not remove renamed net {old!r}: {e}")
+            renamed[old] = new
+        return renamed
+
+    def _export_netlist_xml(self, schematic_path: str) -> Optional[Any]:
+        """Run ``kicad-cli sch export netlist`` (kicadxml) and return the XML root.
+
+        None on any failure (kicad-cli missing, export error, parse error).
         """
         import subprocess
         import tempfile
@@ -3270,8 +3351,8 @@ class SchematicHandlersMixin:
 
         kicad_cli = self._find_kicad_cli_static()
         if not kicad_cli:
-            logger.warning("kicad-cli not found — sync will not add new footprints")
-            return []
+            logger.warning("kicad-cli not found — cannot export the schematic netlist")
+            return None
 
         with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tmp:
             tmp_path = tmp.name
@@ -3291,36 +3372,45 @@ class SchematicHandlersMixin:
             if result.returncode != 0:
                 logger.warning(
                     f"kicad-cli netlist export failed (exit {result.returncode}): "
-                    f"{result.stderr.strip()}"
+                    f"{(result.stderr or result.stdout).strip()}"
                 )
-                return []
-
-            tree = ET.parse(tmp_path)
-            root = tree.getroot()
-            components = []
-            for comp in root.findall("./components/comp"):
-                # <tstamps> carries the schematic symbol UUID -- verified
-                # against kicad-cli 10.0: a bare UUID with no sheet path
-                # (instances of a reused sheet share it). Legacy exports
-                # could comma-join several; keep the first.
-                tstamps = (comp.findtext("tstamps") or "").replace(",", " ").split()
-                components.append(
-                    {
-                        "reference": comp.get("ref", ""),
-                        "value": comp.findtext("value", ""),
-                        "footprint": comp.findtext("footprint", ""),
-                        "uuid": tstamps[0] if tstamps else "",
-                    }
-                )
-            return components
+                return None
+            return ET.parse(tmp_path).getroot()
         except Exception as e:
-            logger.warning(f"Failed to extract components from schematic: {e}")
-            return []
+            logger.warning(f"Failed to export schematic netlist: {e}")
+            return None
         finally:
             try:
                 Path(tmp_path).unlink()
             except OSError:
                 pass
+
+    def _extract_components_from_schematic(self, schematic_path: str) -> List[Dict[str, str]]:
+        """Run kicad-cli netlist export and return the flat list of components.
+
+        Each entry: {"reference": str, "value": str, "footprint": str}
+        Empty list on any failure (kicad-cli missing, parse error, etc.) — the
+        caller treats that as "no missing footprints to add".
+        """
+        root = self._export_netlist_xml(schematic_path)
+        if root is None:
+            return []
+        components = []
+        for comp in root.findall("./components/comp"):
+            # <tstamps> carries the schematic symbol UUID -- verified
+            # against kicad-cli 10.0: a bare UUID with no sheet path
+            # (instances of a reused sheet share it). Legacy exports
+            # could comma-join several; keep the first.
+            tstamps = (comp.findtext("tstamps") or "").replace(",", " ").split()
+            components.append(
+                {
+                    "reference": comp.get("ref", ""),
+                    "value": comp.findtext("value", ""),
+                    "footprint": comp.findtext("footprint", ""),
+                    "uuid": tstamps[0] if tstamps else "",
+                }
+            )
+        return components
 
     @staticmethod
     def _fp_lib_tables_state(project_dir: "Path", manager: Any) -> Tuple[Any, Any]:
