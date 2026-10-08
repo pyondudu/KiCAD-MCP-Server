@@ -17,6 +17,7 @@ Coordinate-system notes (from KiCad source sch_io_eagle.cpp):
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -1819,8 +1820,11 @@ class EagleCommands:
             return None
         report_path = sch_path + ".erc.rpt"
         try:
+            # JSON, not the text report: the text report is translated to the
+            # user's locale ("ERC 資訊: 3 個錯誤" under zh_TW), so parsing its
+            # English summary line failed on any non-English desktop.
             result = subprocess.run(
-                [cli, "sch", "erc", sch_path, "-o", report_path],
+                [cli, "sch", "erc", sch_path, "--format", "json", "-o", report_path],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -1828,15 +1832,15 @@ class EagleCommands:
             if result.returncode != 0 or not os.path.exists(report_path):
                 return None
             with open(report_path, "r", encoding="utf-8", errors="replace") as fh:
-                report = fh.read()
-            summary = re.search(r"ERC messages:\s*\d+\s+Errors\s+(\d+)\s+Warnings\s+(\d+)", report)
-            if not summary:
-                return None
+                data = json.load(fh)
+            violations = list(data.get("violations", []))
+            for sheet in data.get("sheets", []):
+                violations.extend(sheet.get("violations", []))
             return {
                 "ran": True,
-                "errors": int(summary.group(1)),
-                "warnings": int(summary.group(2)),
-                "wire_dangling": report.count("[wire_dangling]"),
+                "errors": sum(1 for v in violations if v.get("severity") == "error"),
+                "warnings": sum(1 for v in violations if v.get("severity") == "warning"),
+                "wire_dangling": sum(1 for v in violations if v.get("type") == "wire_dangling"),
             }
         except Exception as e:  # noqa: BLE001 - ERC is advisory, never fail the import
             logger.warning("Post-import ERC check skipped: %s", e)

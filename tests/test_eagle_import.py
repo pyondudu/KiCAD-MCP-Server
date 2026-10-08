@@ -37,7 +37,8 @@ def test_parse_minimal_eagle_fixture() -> None:
     assert junctions == []
 
 
-def test_generate_kicad_sch_from_minimal_fixture(tmp_path: Path) -> None:
+def test_generate_kicad_sch_from_minimal_fixture(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "10")  # asserts the KiCad 10 header
     parts, instances, net_wires, net_labels, junctions = parse_eagle_schematic(str(FIXTURE))
     out = tmp_path / "minimal.kicad_sch"
     sch_uuid, dangling = generate_kicad_sch(
