@@ -116,7 +116,7 @@ class TestCarryRenamedNets:
         track.SetNet.assert_called_once_with(nets["/LED_A"])
         zone.SetNet.assert_called_once_with(nets["/LED_A"])
         other.SetNet.assert_not_called()
-        board.Remove.assert_called_once_with(nets["LED_A"])
+        board.Delete.assert_called_once_with(nets["LED_A"])
 
     def test_split_net_is_left_alone(self):
         iface = _interface()
@@ -125,7 +125,7 @@ class TestCarryRenamedNets:
 
         assert iface._carry_renamed_nets(board, {"OLD": {"A", "B"}}, {"A", "B"}) == {}
         track.SetNet.assert_not_called()
-        board.Remove.assert_not_called()
+        board.Delete.assert_not_called()
 
     def test_net_still_on_a_pad_is_left_alone(self):
         iface = _interface()

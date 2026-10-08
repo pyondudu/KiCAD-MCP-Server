@@ -25,7 +25,7 @@ import sexpdata
 from commands.library_schematic import LibraryManager as SchematicLibraryManager
 from commands.schematic import SchematicLoadError, SchematicManager
 from commands.wire_manager import WireManager
-from utils.board_items import clone_footprint
+from utils.board_items import clone_footprint, delete_board_item
 from utils.interactive_schematic import reload_kicad_schematic
 from utils.kicad_cli import kicad_cli_not_found_message, resolve_kicad_cli
 from utils.project_settings_guard import preserve_project_settings
@@ -3361,7 +3361,7 @@ class SchematicHandlersMixin:
                     item.SetNet(new_net)
             if nets_by_name.has_key(old):
                 try:
-                    board.Remove(nets_by_name[old])
+                    delete_board_item(board, nets_by_name[old])
                 except Exception as e:  # stale empty net is harmless
                     logger.debug(f"could not remove renamed net {old!r}: {e}")
             renamed[old] = new
