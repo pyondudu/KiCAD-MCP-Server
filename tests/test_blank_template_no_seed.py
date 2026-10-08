@@ -43,10 +43,18 @@ def _load(module_name: str, filename: str):
     return mod
 
 
+import pytest  # noqa: E402
+
 _sch_mod = _load("schematic_module", "schematic.py")
 _proj_mod = _load("project_module", "project.py")
 SchematicManager = _sch_mod.SchematicManager
 ProjectCommands = _proj_mod.ProjectCommands
+
+
+@pytest.fixture(autouse=True)
+def _kicad10(monkeypatch):
+    """These tests pin the KiCad 10 header; the KiCad 9 path is in test_kicad_version."""
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "10")
 
 
 def _assert_blank(sch_text: str) -> None:

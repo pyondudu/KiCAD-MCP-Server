@@ -124,11 +124,12 @@ def test_create_schematic_accepts_full_sch_path_in_path_arg():
             assert "V4.kicad_sch/V4.kicad_sch" not in used_path.replace(os.sep, "/")
 
 
-def test_create_schematic_fallback_writes_kicad10_header():
+def test_create_schematic_fallback_writes_kicad10_header(monkeypatch):
     """
     Issue #221: when the template file is missing, the fallback writer must emit
     the KiCad 10 schematic header, not the stale KiCad 9 (20250114) token.
     """
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "10")
     m = mock_open()
     with (
         patch.object(_mod, "Schematic"),

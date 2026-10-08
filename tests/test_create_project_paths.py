@@ -58,12 +58,13 @@ def test_create_project_returns_paths_without_mixed_separators():
     assert project["schematicPath"].endswith("EspDinIoT.kicad_sch")
 
 
-def test_create_project_fallback_schematic_uses_kicad10_header():
+def test_create_project_fallback_schematic_uses_kicad10_header(monkeypatch):
     """
     Issue #221: when the schematic template is missing, the fallback writer in
     create_project must emit the KiCad 10 header rather than the stale KiCad 9
     (20250114) token.
     """
+    monkeypatch.setenv("KICAD_MCP_KICAD_MAJOR", "10")
     cmds = ProjectCommands()
     m = mock_open()
     with (

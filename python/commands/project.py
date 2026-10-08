@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 import pcbnew  # type: ignore
 from utils.kicad_project import write_kicad_pro
+from utils.kicad_version import apply_sch_format, sch_header_line
 from utils.project_settings_guard import (
     preserve_project_settings,
     restore_project_file_if_changed,
@@ -119,6 +120,9 @@ class ProjectCommands:
                     content,
                     count=1,  # Only replace first (schematic) UUID
                 )
+                # Match the header to the installed KiCad: KiCad 9 cannot open
+                # the template's KiCad 10 header.
+                content = apply_sch_format(content)
                 with open(schematic_path, "w", encoding="utf-8", newline="\n") as f:
                     f.write(content)
 
@@ -132,13 +136,9 @@ class ProjectCommands:
 
                 schematic_root_uuid = str(uuid_module.uuid4())
                 with open(schematic_path, "w", encoding="utf-8", newline="\n") as f:
-                    # KiCad 10 schematic header (matches what eeschema writes for a
-                    # new file). The older 20250114 token is the KiCad 9 format and
-                    # is stale under KiCad 10 (issue #221).
-                    f.write(
-                        '(kicad_sch (version 20260101) (generator "eeschema")'
-                        ' (generator_version "10.0")\n\n'
-                    )
+                    # Header for the installed KiCad (KiCad 10 format when unknown,
+                    # issue #221; KiCad 9 cannot open a KiCad 10 header).
+                    f.write(sch_header_line())
                     f.write(f"  (uuid {schematic_root_uuid})\n\n")
                     f.write('  (paper "A4")\n\n')
                     f.write("  (lib_symbols\n  )\n\n")
