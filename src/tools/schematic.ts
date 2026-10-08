@@ -1217,6 +1217,12 @@ edit_schematic_component and set its value to an empty string.`,
         .boolean()
         .optional()
         .describe("Square up wire bends that the rotation turned diagonal (default true)."),
+      autoplaceFields: z
+        .boolean()
+        .optional()
+        .describe(
+          "Re-place the Reference/Value fields beside the rotated body, reading horizontally (default true). Fields marked do_not_autoplace are left alone.",
+        ),
       unit: z
         .number()
         .int()
@@ -1231,6 +1237,7 @@ edit_schematic_component and set its value to an empty string.`,
       angle: number;
       mirror?: "x" | "y";
       straightenWires?: boolean;
+      autoplaceFields?: boolean;
       unit?: number;
     }) => {
       const result = await callKicadScript("rotate_schematic_component", args);

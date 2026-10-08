@@ -304,6 +304,10 @@ class SchematicHandlersMixin:
                 mirror_y=mirror_y,
                 project_path=derived_project_path,
             )
+            if component.get("autoplaceFields", True):
+                from commands.field_autoplace import autoplace_reference_fields
+
+                autoplace_reference_fields(schematic_file, reference, unit)
 
             self._reload_kicad_schematic()
 
@@ -2204,11 +2208,20 @@ class SchematicHandlersMixin:
             with open(schematic_path, "w", encoding="utf-8") as f:
                 f.write(kicad_dumps(sch_data))
 
+            # Fields keep their old spot and angle otherwise: rotating a
+            # resistor to 90 left "R1" drawn vertically across its pins.
+            fields_placed = False
+            if params.get("autoplaceFields", True):
+                from commands.field_autoplace import autoplace_reference_fields
+
+                fields_placed = autoplace_reference_fields(schematic_path, reference, unit)
+
             return {
                 "success": True,
                 "reference": reference,
                 "unit": unit,
                 "angle": angle,
+                "fieldsAutoplaced": fields_placed,
                 "mirror": effective_mirror,
                 "wiresMoved": drag_summary.get("endpoints_moved", 0),
                 "wiresRemoved": drag_summary.get("wires_removed", 0),

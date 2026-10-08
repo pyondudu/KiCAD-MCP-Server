@@ -19,13 +19,13 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from commands.dynamic_symbol_loader import DynamicSymbolLoader
+from commands.field_autoplace import autoplace_fields
 from commands.pin_locator import PinLocator
 from commands.schematic_text_utils import (
     _extract_property_position,
     _find_facing_label,
     _find_placed_symbol_block,
     _find_project_root,
-    _move_property_in_block,
 )
 from commands.wire_manager import WireManager
 from utils.symbol_instances import add_missing_instances, instance_report
@@ -38,30 +38,6 @@ _GRID = 1.27  # 50-mil KiCad schematic grid (mm)
 def _snap(val: float) -> float:
     """Round a coordinate to the nearest 50-mil (1.27mm) schematic grid point."""
     return round(round(val / _GRID) * _GRID, 4)
-
-
-def _field_positions_for_pins(cx, cy, all_pins):
-    """Compute (Reference, Value) field positions from pin axis. Returns list of (name,x,y,angle)."""
-    off = 2.54
-    if len(all_pins) == 2:
-        coords = list(all_pins.values())
-        p1x = float(coords[0][0]) if isinstance(coords[0], (list, tuple)) else float(coords[0]["x"])
-        p1y = float(coords[0][1]) if isinstance(coords[0], (list, tuple)) else float(coords[0]["y"])
-        p2x = float(coords[1][0]) if isinstance(coords[1], (list, tuple)) else float(coords[1]["x"])
-        p2y = float(coords[1][1]) if isinstance(coords[1], (list, tuple)) else float(coords[1]["y"])
-        if abs(p1y - p2y) > abs(p1x - p2x):  # vertical pin axis -> labels left/right
-            return [("Reference", round(cx - off, 4), cy, 0), ("Value", round(cx + off, 4), cy, 0)]
-        return [("Reference", cx, round(cy - off, 4), 0), ("Value", cx, round(cy + off, 4), 0)]
-    if all_pins:  # multi-pin -> above topmost / below bottommost
-        pin_ys = [
-            float(c[1]) if isinstance(c, (list, tuple)) else float(c["y"])
-            for c in all_pins.values()
-        ]
-        return [
-            ("Reference", cx, round(min(pin_ys) - off, 4), 0),
-            ("Value", cx, round(max(pin_ys) + off, 4), 0),
-        ]
-    return [("Reference", cx, round(cy - off, 4), 0), ("Value", cx, round(cy + off, 4), 0)]
 
 
 def _bbox_from_pins(all_pins, cx, cy):
@@ -179,12 +155,7 @@ class SchematicBatchCommands:
                         raw_content, reference, unit
                     )
                     if auto_position_fields and block_text:
-                        cx, cy = _snap(x), _snap(y)
-                        new_block = block_text
-                        for prop, px, py, pa in _field_positions_for_pins(cx, cy, all_pins):
-                            new_block, _ = _move_property_in_block(
-                                new_block, prop, px, py, pa, True
-                            )
+                        new_block = autoplace_fields(block_text, raw_content, all_pins)
                         if new_block != block_text:
                             raw_content = (
                                 raw_content[:block_start] + new_block + raw_content[block_end + 1 :]

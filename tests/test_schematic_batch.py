@@ -16,7 +16,6 @@ from commands import schematic_batch as sb  # noqa: E402
 from commands.schematic_batch import (  # noqa: E402
     SchematicBatchCommands,
     _bbox_from_pins,
-    _field_positions_for_pins,
     _find_facing_label,
     _find_project_root,
     _snap,
@@ -51,21 +50,6 @@ class TestHelpers:
         assert _find_facing_label(f, "GND", [12, 20], orientation=180) is None
         # Too far -> None
         assert _find_facing_label(f, "VBUS", [100, 200], orientation=180) is None
-
-    def test_field_positions_two_pin_vertical(self):
-        # pins stacked vertically -> labels go left/right
-        pins = {"1": [0, 5], "2": [0, -5]}
-        fp = _field_positions_for_pins(0, 0, pins)
-        names = {n for n, *_ in fp}
-        assert names == {"Reference", "Value"}
-        ref = next(p for p in fp if p[0] == "Reference")
-        assert ref[1] != 0  # x offset (left/right), y unchanged
-
-    def test_field_positions_two_pin_horizontal(self):
-        pins = {"1": [-5, 0], "2": [5, 0]}
-        fp = _field_positions_for_pins(0, 0, pins)
-        ref = next(p for p in fp if p[0] == "Reference")
-        assert ref[1] == 0 and ref[2] != 0  # above/below
 
     def test_bbox_from_pins(self):
         bb = _bbox_from_pins({"1": [0, 0], "2": [10, 4]}, 5, 2)
