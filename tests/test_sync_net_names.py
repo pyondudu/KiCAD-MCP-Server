@@ -65,6 +65,37 @@ class TestCliPadNetMap:
         assert names == {"+5V", "/LED_A"}
         assert ("X1", "1") not in pad_map, "unnamed nets are skipped"
 
+    def test_keeps_escaped_net_names_from_sexpr_netlist(self, tmp_path):
+        """A pin named "XTAL2/PB4" gives eeschema the net
+        "Net-(U1-XTAL2{slash}PB4)"; kicadxml unescapes it, which made DRC
+        schematic parity flag every pad on such a net as a net_conflict."""
+        sexpr = (
+            '(export (version "E")\n'
+            '  (components (comp (ref "U1") (value "ATtiny85")))\n'
+            "  (nets\n"
+            '    (net (code "1") (name "Net-(U1-XTAL2{slash}PB4)") (class "Default")\n'
+            '      (node (ref "SW1") (pin "1") (pintype "passive"))\n'
+            '      (node (ref "U1") (pin "3") (pinfunction "XTAL2/PB4")))\n'
+            '    (net (code "2") (name "/MOSI") (class "Default")\n'
+            '      (node (ref "U1") (pin "5")))))\n'
+        )
+
+        def run(cmd, **kwargs):
+            body = sexpr if "kicadsexpr" in cmd else NETLIST_XML
+            Path(cmd[cmd.index("--output") + 1]).write_text(body, encoding="utf-8")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        iface = _interface()
+        with (
+            patch.object(iface.__class__, "_find_kicad_cli_static", return_value="/fake/kicad-cli"),
+            patch("subprocess.run", side_effect=run),
+        ):
+            pad_map, names = iface._cli_pad_net_map(str(tmp_path / "x.kicad_sch"))
+
+        assert pad_map[("U1", "3")] == "Net-(U1-XTAL2{slash}PB4)"
+        assert pad_map[("SW1", "1")] == "Net-(U1-XTAL2{slash}PB4)"
+        assert names == {"Net-(U1-XTAL2{slash}PB4)", "/MOSI"}
+
     def test_none_without_kicad_cli(self, tmp_path):
         iface = _interface()
         with patch.object(iface.__class__, "_find_kicad_cli_static", return_value=None):

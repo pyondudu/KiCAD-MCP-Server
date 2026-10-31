@@ -3316,23 +3316,104 @@ class SchematicHandlersMixin:
         names. Pins KiCad leaves unconnected get its ``unconnected-(...)`` nets,
         exactly as Update PCB from Schematic (F8) assigns them.
         """
-        root = self._export_netlist_xml(schematic_path)
-        if root is None:
-            return None
+        # The kicadsexpr netlist keeps eeschema's escaped net names
+        # ("Net-(U1-XTAL2{slash}PB4)"); kicadxml unescapes them to
+        # "Net-(U1-XTAL2/PB4)", which DRC schematic parity then reports as a
+        # net_conflict on every pad of a net named after a pin with "/" in it.
+        nets = self._export_netlist_sexpr_nets(schematic_path)
+        if nets is None:
+            root = self._export_netlist_xml(schematic_path)
+            if root is None:
+                return None
+            nets = [
+                (
+                    net.get("name") or "",
+                    [(node.get("ref"), node.get("pin")) for node in net.findall("node")],
+                )
+                for net in root.findall("./nets/net")
+            ]
         pad_net_map: Dict[Tuple[str, str], str] = {}
         net_names: set = set()
-        for net in root.findall("./nets/net"):
-            name = net.get("name") or ""
+        for name, nodes in nets:
             if not name:
                 continue
-            for node in net.findall("node"):
-                ref, pin = node.get("ref"), node.get("pin")
+            for ref, pin in nodes:
                 if ref and pin is not None:
                     pad_net_map[(ref, str(pin))] = name
                     net_names.add(name)
         if not pad_net_map:
             return None
         return pad_net_map, net_names
+
+    def _export_netlist_sexpr_nets(
+        self, schematic_path: str
+    ) -> Optional[List[Tuple[str, List[Tuple[str, str]]]]]:
+        """Nets from ``kicad-cli sch export netlist --format kicadsexpr``.
+
+        Returns ``[(net_name, [(ref, pin), ...]), ...]`` with net names exactly
+        as eeschema stores them (escaped), or None on any failure so the
+        caller can fall back to the XML export.
+        """
+        import subprocess
+        import tempfile
+
+        kicad_cli = self._find_kicad_cli_static()
+        if not kicad_cli:
+            return None
+        with tempfile.NamedTemporaryFile(suffix=".net", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            cmd = [
+                kicad_cli,
+                "sch",
+                "export",
+                "netlist",
+                "--format",
+                "kicadsexpr",
+                "--output",
+                tmp_path,
+                schematic_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                return None
+            tree = sexpdata.loads(Path(tmp_path).read_text(encoding="utf-8"))
+
+            def head(item: Any) -> str:
+                if isinstance(item, list) and item and isinstance(item[0], sexpdata.Symbol):
+                    return item[0].value()
+                return ""
+
+            def field(item: List[Any], key: str) -> Optional[str]:
+                for sub in item[1:]:
+                    if head(sub) == key and len(sub) > 1:
+                        return str(sub[1])
+                return None
+
+            if head(tree) != "export":
+                return None
+            nets: List[Tuple[str, List[Tuple[str, str]]]] = []
+            for section in tree[1:]:
+                if head(section) != "nets":
+                    continue
+                for net in section[1:]:
+                    if head(net) != "net":
+                        continue
+                    nodes = [
+                        (field(n, "ref") or "", field(n, "pin") or "")
+                        for n in net[1:]
+                        if head(n) == "node"
+                    ]
+                    nets.append((field(net, "name") or "", nodes))
+            return nets
+        except Exception as e:
+            logger.debug(f"kicadsexpr netlist unavailable, falling back to XML: {e}")
+            return None
+        finally:
+            try:
+                Path(tmp_path).unlink()
+            except OSError:
+                pass
 
     @staticmethod
     def _carry_renamed_nets(board: Any, moved: Dict[str, set], live_names: set) -> Dict[str, str]:
