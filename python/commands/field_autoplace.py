@@ -97,6 +97,25 @@ def _graphics_points(lib_sym: list, unit: int) -> List[Tuple[float, float]]:
     return pts
 
 
+def _unit_pins(lib_sym: list, unit: int) -> List[Tuple[float, float]]:
+    """Connection points of the pins drawn by ``unit`` (lib coords, Y up).
+
+    Pins in ``<name>_0_*`` sub-symbols are common to every unit. A multi-unit
+    part's other units are placed elsewhere on the sheet, so their pins must
+    not decide which side of *this* unit is free.
+    """
+    pts: List[Tuple[float, float]] = []
+    for sub in _items(lib_sym, "symbol"):
+        m = re.search(r"_(\d+)_(\d+)$", str(sub[1]))
+        if m and int(m.group(1)) not in (0, unit):
+            continue
+        for pin in _items(sub, "pin"):
+            at = _first(pin, "at")
+            if at:
+                pts.append((float(at[1]), float(at[2])))
+    return pts
+
+
 def _bbox(points: List[Tuple[float, float]]) -> Optional[BBox]:
     if not points:
         return None
@@ -212,10 +231,13 @@ def autoplace_fields(
         return block
 
     lib_box = _bbox(_graphics_points(lib_sym, unit))
-    pins = []
-    for c in (all_pins or {}).values():
-        px, py = (c[0], c[1]) if isinstance(c, (list, tuple)) else (c["x"], c["y"])
-        pins.append((float(px), float(py)))
+    pins = [world(px, py) for px, py in _unit_pins(lib_sym, unit)]
+    if not pins:
+        # No pin data in the embedded library symbol: fall back to the
+        # caller's pin map (which, for a multi-unit part, spans every unit).
+        for c in (all_pins or {}).values():
+            px, py = (c[0], c[1]) if isinstance(c, (list, tuple)) else (c["x"], c["y"])
+            pins.append((float(px), float(py)))
 
     if lib_box:
         corners = [world(x, y) for x in (lib_box[0], lib_box[2]) for y in (lib_box[1], lib_box[3])]
@@ -223,7 +245,9 @@ def autoplace_fields(
     else:
         body = _bbox(pins)
         if body:
-            body = (body[0] + _GAP, body[1] + _GAP, body[2] - _GAP, body[3] - _GAP)
+            # No body graphics (an op-amp's power unit is just two pins): the
+            # pin names are drawn beside the pin line, so keep clear of them.
+            body = (body[0] - _LINE, body[1] + _GAP, body[2] + _LINE, body[3] - _GAP)
     if body is None:
         body = (cx - _GAP, cy - _GAP, cx + _GAP, cy + _GAP)
     x0, y0, x1, y1 = body
@@ -261,9 +285,19 @@ def autoplace_fields(
     elif "left" not in sides:
         top = bcy - (n - 1) * _LINE / 2
         spots = [(x0 - _GAP, top + i * _LINE, "right") for i in range(n)]
-    else:  # pins on every side: above the top pins / below the bottom pins
-        ys = [p[1] for p in pins] or [y0, y1]
-        spots = [(bcx, min(ys) - _LINE, None), (bcx, max(ys) + _LINE, None)][:n]
+    else:
+        # Pins on every side (NE555: VCC on top, GND below). Centred above the
+        # body the text sits on the top pin's wire, so start it just right of
+        # the rightmost top pin (Reference) / bottom pin (Value), left-justified.
+        def right_of(side_pins: List[Tuple[float, float]]) -> float:
+            return max(p[0] for p in side_pins) + _GAP if side_pins else bcx
+
+        top_pins = [p for p in pins if (p[1] - bcy) / hh < -abs((p[0] - bcx) / hw)]
+        bottom_pins = [p for p in pins if (p[1] - bcy) / hh > abs((p[0] - bcx) / hw)]
+        spots = [
+            (right_of(top_pins), y0 - _GAP - 0.635, "left"),
+            (right_of(bottom_pins), y1 + _GAP + 0.635, "left"),
+        ][:n]
 
     block = block_text
     for prop, (fx, fy, just) in zip(shown, spots):

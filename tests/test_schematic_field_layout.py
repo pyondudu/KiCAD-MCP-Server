@@ -210,3 +210,26 @@ class TestBatchSetPropertyPositions:
 class TestAutoplaceValidation:
     def test_autoplace_requires_path(self):
         assert SchematicFieldLayoutCommands().autoplace_schematic_fields({})["success"] is False
+
+
+class TestAutoplaceIcWithTopAndBottomPins:
+    """NE555: VCC on top, GND below. autoplace_schematic_fields centred both
+    fields over the body, 1.27 mm apart: they overlapped each other and sat on
+    the VCC wire."""
+
+    def test_fields_clear_the_top_pin_and_each_other(self, tmp_path):
+        import shutil
+
+        f = tmp_path / "ne555.kicad_sch"
+        shutil.copy(Path(__file__).parent / "fixtures" / "ne555_fields.kicad_sch", f)
+        res = SchematicFieldLayoutCommands().autoplace_schematic_fields(
+            {"schematicPath": str(f), "references": ["U1"]}
+        )
+        assert res["success"] is True
+        block, _, _ = _find_placed_symbol_block(f.read_text(encoding="utf-8"), "U1")
+        ref = _extract_property_position(block, "Reference")
+        val = _extract_property_position(block, "Value")
+        # VCC pin line is x = 101.6; centred text must start right of it
+        assert ref["x"] - len("U1") * 0.5 > 101.6
+        assert val["x"] - len("NE555D") * 0.5 > 101.6
+        assert abs(ref["y"] - val["y"]) >= 2.54

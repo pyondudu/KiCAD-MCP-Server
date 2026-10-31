@@ -124,3 +124,85 @@ def test_do_not_autoplace_field_is_left_alone():
 def test_unknown_lib_symbol_leaves_block_unchanged():
     block = _placed("Nope:X", "U1", "x", 50, 50, 0)
     assert _place(block, {}) == block
+
+
+# A 555-like part with pins on all four sides, and a dual op-amp whose power
+# pins live in their own unit (3), as in the KiCad library.
+LIB_IC = """(kicad_sch (version 20250114)
+  (lib_symbols
+    (symbol "Timer:NE555D"
+      (property "Reference" "U" (at -10.16 8.89 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "NE555D" (at 2.54 8.89 0) (effects (font (size 1.27 1.27))))
+      (symbol "NE555D_0_1"
+        (rectangle (start -8.89 -7.62) (end 8.89 7.62) (stroke (width 0.254)) (fill (type none))))
+      (symbol "NE555D_1_1"
+        (pin power_in line (at 0 -10.16 90) (length 2.54) (name "GND") (number "1"))
+        (pin input line (at -12.7 5.08 0) (length 3.81) (name "TR") (number "2"))
+        (pin output line (at 12.7 5.08 180) (length 3.81) (name "Q") (number "3"))
+        (pin input line (at -12.7 -5.08 0) (length 3.81) (name "R") (number "4"))
+        (pin input line (at -12.7 0 0) (length 3.81) (name "CV") (number "5"))
+        (pin input line (at 12.7 -5.08 180) (length 3.81) (name "THR") (number "6"))
+        (pin input line (at 12.7 0 180) (length 3.81) (name "DIS") (number "7"))
+        (pin power_in line (at 0 10.16 270) (length 2.54) (name "VCC") (number "8"))))
+    (symbol "Amplifier_Operational:LM358"
+      (property "Reference" "U" (at 0 5.08 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "LM358" (at 0 -5.08 0) (effects (font (size 1.27 1.27))))
+      (symbol "LM358_1_1"
+        (polyline (pts (xy -5.08 5.08) (xy 5.08 0) (xy -5.08 -5.08) (xy -5.08 5.08)))
+        (pin output line (at 7.62 0 180) (length 2.54) (name "~") (number "1"))
+        (pin input line (at -7.62 -2.54 0) (length 2.54) (name "-") (number "2"))
+        (pin input line (at -7.62 2.54 0) (length 2.54) (name "+") (number "3")))
+      (symbol "LM358_2_1"
+        (polyline (pts (xy -5.08 5.08) (xy 5.08 0) (xy -5.08 -5.08) (xy -5.08 5.08)))
+        (pin input line (at -7.62 2.54 0) (length 2.54) (name "+") (number "5"))
+        (pin input line (at -7.62 -2.54 0) (length 2.54) (name "-") (number "6"))
+        (pin output line (at 7.62 0 180) (length 2.54) (name "~") (number "7")))
+      (symbol "LM358_3_1"
+        (pin power_in line (at -2.54 -7.62 90) (length 3.81) (name "V-") (number "4"))
+        (pin power_in line (at -2.54 7.62 270) (length 3.81) (name "V+") (number "8")))))
+"""
+
+
+def _placed_unit(lib_id, ref, value, x, y, unit):
+    return _placed(lib_id, ref, value, x, y, 0).replace("(unit 1)", f"(unit {unit})")
+
+
+def test_ic_with_pins_on_every_side_keeps_fields_off_the_top_and_bottom_pin_wires():
+    # NE555D at (101.6, 88.9): VCC at (101.6, 78.74), GND at (101.6, 99.06)
+    block = _placed("Timer:NE555D", "U1", "NE555D", 101.6, 88.9, 0)
+    b = autoplace_fields(block, LIB_IC + block + "\n)", {})
+    ref, val = _pos(b, "Reference"), _pos(b, "Value")
+    assert ref["x"] > 101.6 and val["x"] > 101.6, "text starts right of the pin wire"
+    assert ref["y"] < 88.9 - 7.62 and val["y"] > 88.9 + 7.62
+    assert b.count("(justify left)") == 2
+
+
+@pytest.mark.parametrize(
+    "unit, x, y",
+    [(1, 101.6, 88.9), (2, 139.7, 91.44), (3, 73.66, 124.46)],
+)
+def test_multi_unit_fields_stay_beside_their_own_unit(unit, x, y):
+    """Every unit was placed against the pins of all units (they share a
+    reference), so U1C's fields landed beside U1A and U1A's Value on R1."""
+    all_units_pins = {  # what PinLocator returns for "U1": every unit's pins
+        "1": (109.22, 88.9),
+        "2": (93.98, 91.44),
+        "3": (93.98, 86.36),
+        "5": (132.08, 88.9),
+        "6": (132.08, 93.98),
+        "7": (147.32, 91.44),
+        "4": (71.12, 132.08),
+        "8": (71.12, 116.84),
+    }
+    block = _placed_unit("Amplifier_Operational:LM358", "U1", "LM358", x, y, unit)
+    b = autoplace_fields(block, LIB_IC + block + "\n)", all_units_pins)
+    for prop in ("Reference", "Value"):
+        p = _pos(b, prop)
+        assert abs(p["x"] - x) < 12 and abs(p["y"] - y) < 12, f"{prop} of unit {unit} at {p}"
+
+
+def test_power_unit_fields_clear_the_pin_names():
+    block = _placed_unit("Amplifier_Operational:LM358", "U1", "LM358", 73.66, 124.46, 3)
+    b = autoplace_fields(block, LIB_IC + block + "\n)", {})
+    # pin line at x = 71.12; pin names are drawn just right of it
+    assert _pos(b, "Reference")["x"] >= 71.12 + 2.54

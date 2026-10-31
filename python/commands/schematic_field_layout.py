@@ -480,17 +480,44 @@ class SchematicFieldLayoutCommands:
                 else:
                     sides = ["above", "below", "right", "left"]
 
+                pin_xy = [
+                    (
+                        (float(c[0]), float(c[1]))
+                        if isinstance(c, (list, tuple))
+                        else (float(c["x"]), float(c["y"]))
+                    )
+                    for c in (comp_pin_map.get(ref) or {}).values()
+                ]
+                # body_bbox already spans the pin tips plus a grid margin, so a
+                # top/bottom pin ends within two grid steps of that edge.
+                top_pin_x = [px for px, py in pin_xy if py <= ext_bb["y_min"] + 2 * _GRID]
+                bottom_pin_x = [px for px, py in pin_xy if py >= ext_bb["y_max"] - 2 * _GRID]
+
                 def try_side(side):
                     half_ref_h = text_height / 2.0
                     half_ref_w = max(len(ref), 1) * 0.75 / 2.0
                     half_val_w = max(len(str(val_text)), 1) * 0.75 / 2.0
-                    stack = text_height
+                    # One text line plus a gap: at 1.27 the two lines touched
+                    # and read as one ("NE555D" drawn over "U1").
+                    stack = 2 * _GRID
+                    if side in ("above", "below"):
+                        side_pins = top_pin_x if side == "above" else bottom_pin_x
+                        # Centred over a pin on that side the text sits on the
+                        # pin's wire (an IC's VCC/GND): move it right of them.
+                        # Centred text: clear the wire by half its width,
+                        # estimated generously (1.27 mm glyphs are ~1 mm wide).
+                        rx = snap(max(side_pins) + clearance + len(ref) * 0.55) if side_pins else cx
+                        vx = (
+                            snap(max(side_pins) + clearance + len(str(val_text)) * 0.55)
+                            if side_pins
+                            else cx
+                        )
                     if side == "above":
                         ref_y = snap(ext_bb["y_min"] - half_ref_h - clearance)
-                        return cx, ref_y, cx, ref_y - stack
+                        return rx, ref_y - stack, vx, ref_y
                     if side == "below":
                         ref_y = snap(ext_bb["y_max"] + half_ref_h + clearance)
-                        return cx, ref_y, cx, ref_y + stack
+                        return rx, ref_y, vx, ref_y + stack
                     if side == "right":
                         x0 = ext_bb["x_max"] + clearance
                         ref_y = snap(cy)
