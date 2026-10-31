@@ -798,11 +798,39 @@ def find_wires_crossing_symbols(schematic_path: Path) -> List[Dict[str, Any]]:
         for pos in pin_positions.values():
             pin_set.add((pos[0], pos[1]))
 
+        # Outward direction of each pin (from its body end to its connection
+        # point). A wire leaving a pin in that direction is not crossing the
+        # symbol even when graphics such as an LED's light arrows push the
+        # bbox past the pin tip (rotated LED: the cathode wire was reported).
+        pin_outward: Dict[Tuple[float, float], Tuple[float, float]] = {}
+        for pin_num, pdata in pin_defs.items():
+            px, py = float(pdata["x"]), float(pdata["y"])
+            length = float(pdata.get("length", 0) or 0)
+            if length <= 0:
+                continue
+            ang = math.radians(float(pdata.get("angle", 0) or 0))
+            bx, by = px + length * math.cos(ang), py + length * math.sin(ang)
+            cx, cy = pin_positions[pin_num]
+            wx, wy = WireDragger.pin_world_xy(
+                bx,
+                by,
+                sym["x"],
+                sym["y"],
+                sym["rotation"],
+                sym.get("mirror_x", False),
+                sym.get("mirror_y", False),
+            )
+            ox, oy = cx - wx, cy - wy
+            norm = math.hypot(ox, oy)
+            if norm > 0:
+                pin_outward[(cx, cy)] = (ox / norm, oy / norm)
+
         symbol_data.append(
             {
                 "sym": sym,
                 "bbox": bbox,
                 "pin_set": pin_set,
+                "pin_outward": pin_outward,
             }
         )
 
@@ -843,10 +871,24 @@ def find_wires_crossing_symbols(schematic_path: Path) -> List[Dict[str, Any]]:
                         nsx, nsy = sx + ux * nudge, sy + uy * nudge
                         if not _line_segment_intersects_aabb(nsx, nsy, ex, ey, bx1, by1, bx2, by2):
                             continue  # Wire terminates at pin from outside
+                        pin_xy, away = (sx, sy), (ux, uy)
                     else:
                         nex, ney = ex - ux * nudge, ey - uy * nudge
                         if not _line_segment_intersects_aabb(sx, sy, nex, ney, bx1, by1, bx2, by2):
                             continue  # Wire terminates at pin from outside
+                        pin_xy, away = (ex, ey), (-ux, -uy)
+                    # Leaves the pin straight outward, along the pin's own axis.
+                    out = next(
+                        (
+                            d
+                            for (px, py), d in sd["pin_outward"].items()
+                            if abs(pin_xy[0] - px) < pin_tolerance
+                            and abs(pin_xy[1] - py) < pin_tolerance
+                        ),
+                        None,
+                    )
+                    if out and away[0] * out[0] + away[1] * out[1] > 0.999:
+                        continue
 
             sym = sd["sym"]
             collisions.append(

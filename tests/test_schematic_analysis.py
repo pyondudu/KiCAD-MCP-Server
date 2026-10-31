@@ -436,6 +436,41 @@ class TestIntegrationFindWiresCrossingSymbols:
             len(d1_crossings) >= 1
         ), "Wire starting at pin but passing through body must be detected"
 
+    @staticmethod
+    def _rotated_led_with(wires: str) -> Path:
+        """Fixture holds the real Device:LED (with its light arrows) at (100,100)
+        rotated 90 degrees: K (pin 1) at (100, 103.81), A (pin 2) at (100, 96.19)."""
+        fixture = Path(__file__).parent / "fixtures" / "led_rotated_90.kicad_sch"
+        tmp = Path(tempfile.mkdtemp()) / "led.kicad_sch"
+        content = fixture.read_text(encoding="utf-8")
+        idx = content.rfind(")")
+        tmp.write_text(content[:idx] + wires + "\n)", encoding="utf-8")
+        return tmp
+
+    def test_wire_leaving_rotated_led_cathode_outward_not_flagged(self) -> None:
+        """Rotated 90 degrees, the LED's light arrows push its bbox past the
+        cathode tip, so a wire leaving the cathode straight down was reported
+        as crossing D1. Leaving a pin along its own outward axis is fine."""
+        tmp = self._rotated_led_with("""
+        (wire (pts (xy 100 103.81) (xy 100 110))
+            (stroke (width 0) (type default))
+            (uuid "0b6a7c1e-0000-4000-8000-000000000001"))
+        (wire (pts (xy 100 96.19) (xy 100 90))
+            (stroke (width 0) (type default))
+            (uuid "0b6a7c1e-0000-4000-8000-000000000002"))
+        """)
+        result = find_wires_crossing_symbols(tmp)
+        assert [c for c in result if c["component"]["reference"] == "D1"] == []
+
+    def test_wire_from_rotated_led_pin_into_body_still_flagged(self) -> None:
+        tmp = self._rotated_led_with("""
+        (wire (pts (xy 100 103.81) (xy 100 90))
+            (stroke (width 0) (type default))
+            (uuid "0b6a7c1e-0000-4000-8000-000000000003"))
+        """)
+        result = find_wires_crossing_symbols(tmp)
+        assert len([c for c in result if c["component"]["reference"] == "D1"]) >= 1
+
     def test_wire_terminating_at_pin_from_outside(self) -> None:
         """A wire that arrives at a pin from outside the component body
         is a valid connection and must NOT be flagged."""
