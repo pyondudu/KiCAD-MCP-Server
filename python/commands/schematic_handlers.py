@@ -2869,14 +2869,16 @@ class SchematicHandlersMixin:
                 for sheet in erc_data.get("sheets", []):
                     all_violations.extend(sheet.get("violations", []))
 
+                scale = self._erc_position_scale(schematic_path, all_violations)
+
                 for v in all_violations:
                     vseverity = v.get("severity", "error")
                     items = v.get("items", [])
                     loc = {}
                     if items and "pos" in items[0]:
                         loc = {
-                            "x": items[0]["pos"].get("x", 0),
-                            "y": items[0]["pos"].get("y", 0),
+                            "x": round(items[0]["pos"].get("x", 0) * scale, 4),
+                            "y": round(items[0]["pos"].get("y", 0) * scale, 4),
                         }
                     violations.append(
                         {
@@ -2908,6 +2910,48 @@ class SchematicHandlersMixin:
         except Exception as e:
             logger.error(f"Error running ERC: {str(e)}")
             return {"success": False, "message": str(e)}
+
+    @staticmethod
+    def _erc_position_scale(schematic_path: str, violations: List[Dict[str, Any]]) -> float:
+        """Factor that turns kicad-cli ERC JSON positions into schematic mm.
+
+        kicad-cli 9.0.x labels its ERC report ``"coordinate_units": "mm"`` but
+        writes positions 100x too small (a symbol at (66.04, 68.58) is
+        reported at (0.6604, 0.6858)). Rather than trusting a version number,
+        match the reported item UUIDs against the ``(at ...)`` of the items in
+        the schematic and use the ratio when it is clearly 100; otherwise 1.
+        """
+        wanted = {}
+        for v in violations:
+            for item in v.get("items", []):
+                pos, uid = item.get("pos"), item.get("uuid")
+                if uid and pos and (pos.get("x") or pos.get("y")):
+                    wanted[uid] = (pos.get("x", 0.0), pos.get("y", 0.0))
+        if not wanted:
+            return 1.0
+        try:
+            text = Path(schematic_path).read_text(encoding="utf-8")
+        except OSError:
+            return 1.0
+        # A top-level item's own "(at x y" is the first one in its block,
+        # and its "(uuid ...)" follows its fields; pair each uuid with the
+        # nearest preceding top-level-ish "(at" in the same block.
+        for m in re.finditer(r'\(uuid "?([0-9a-fA-F-]{36})"?\)', text):
+            uid = m.group(1)
+            if uid not in wanted:
+                continue
+            block_start = text.rfind("\n\t(", 0, m.start())
+            at = re.search(r"\(at (-?[\d.]+) (-?[\d.]+)", text[block_start : m.start()])
+            if not at:
+                continue
+            sx, sy = float(at.group(1)), float(at.group(2))
+            rx, ry = wanted[uid]
+            ref, rep = (sx, rx) if abs(rx) >= abs(ry) else (sy, ry)
+            if rep and abs(ref / rep - 100.0) < 0.5:
+                return 100.0
+            if rep and abs(ref / rep - 1.0) < 0.01:
+                return 1.0
+        return 1.0
 
     def _build_hierarchical_pad_net_map(self, project_sch_path: str, sheets_out=None):
         """Walk the sheets reachable from the root schematic and build a

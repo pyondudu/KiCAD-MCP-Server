@@ -246,3 +246,88 @@ class TestERCKicad9SheetsViolations:
         # 1 top-level + 1 from sheets = 2 total
         assert "2 violation" in result["message"]
         assert result["summary"]["by_severity"]["error"] == 2
+
+
+# ---------------------------------------------------------------------------
+# kicad-cli 9.0.x writes ERC positions 100x too small
+# ---------------------------------------------------------------------------
+
+_SCH_WITH_SYMBOL = """(kicad_sch
+\t(version 20250114)
+\t(symbol
+\t\t(lib_id "power:PWR_FLAG")
+\t\t(at 66.04 68.58 0)
+\t\t(property "Reference" "#FLG01"
+\t\t\t(at 66.04 64.77 0)
+\t\t)
+\t\t(uuid "e6de929d-bf6a-49ba-be37-39731f5068ff")
+\t)
+)
+"""
+
+
+def _violation(x: float, y: float) -> dict:
+    return {
+        "items": [
+            {
+                "pos": {"x": x, "y": y},
+                "uuid": "e6de929d-bf6a-49ba-be37-39731f5068ff",
+            }
+        ]
+    }
+
+
+@pytest.mark.unit
+class TestErcPositionScale:
+    def test_detects_hundredfold_positions(self, tmp_path):
+        from kicad_interface import KiCADInterface
+
+        sch = tmp_path / "x.kicad_sch"
+        sch.write_text(_SCH_WITH_SYMBOL, encoding="utf-8")
+        assert KiCADInterface._erc_position_scale(str(sch), [_violation(0.6604, 0.6858)]) == 100.0
+
+    def test_correct_positions_left_alone(self, tmp_path):
+        from kicad_interface import KiCADInterface
+
+        sch = tmp_path / "x.kicad_sch"
+        sch.write_text(_SCH_WITH_SYMBOL, encoding="utf-8")
+        assert KiCADInterface._erc_position_scale(str(sch), [_violation(66.04, 68.58)]) == 1.0
+
+    def test_unknown_uuid_means_no_scaling(self, tmp_path):
+        from kicad_interface import KiCADInterface
+
+        sch = tmp_path / "x.kicad_sch"
+        sch.write_text(_SCH_WITH_SYMBOL, encoding="utf-8")
+        v = {
+            "items": [{"pos": {"x": 0.5, "y": 0.5}, "uuid": "00000000-0000-0000-0000-000000000000"}]
+        }
+        assert KiCADInterface._erc_position_scale(str(sch), [v]) == 1.0
+
+    def test_handler_reports_schematic_mm(self, iface, tmp_path):
+        sch = tmp_path / "x.kicad_sch"
+        sch.write_text(_SCH_WITH_SYMBOL, encoding="utf-8")
+        report = {
+            "coordinate_units": "mm",
+            "sheets": [
+                {
+                    "violations": [
+                        dict(
+                            _violation(0.6604, 0.6858),
+                            type="lib_symbol_issues",
+                            severity="warning",
+                            description="library not enabled",
+                        )
+                    ]
+                }
+            ],
+        }
+
+        def run(cmd, **kwargs):
+            Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(report), encoding="utf-8")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        iface.design_rule_commands = MagicMock()
+        iface.design_rule_commands._find_kicad_cli.return_value = "/fake/kicad-cli"
+        with patch("subprocess.run", side_effect=run):
+            result = iface._handle_run_erc({"schematicPath": str(sch)})
+        assert result["violations"][0]["location"] == {"x": 66.04, "y": 68.58}
