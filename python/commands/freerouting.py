@@ -510,6 +510,16 @@ def _reconcile_ses_net_names(
     return _SES_NET_TOKEN_RE.sub(_repl, ses_text), remapped
 
 
+def _unrouted_connection_count(board: Any) -> Optional[int]:
+    """Ratsnest lines left after routing, or None when pcbnew can't say."""
+    try:
+        board.BuildConnectivity()
+        return int(board.GetConnectivity().GetUnconnectedCount(False))
+    except Exception as e:  # SWIG may hand back an unwrapped pointer
+        logger.debug(f"Unrouted count unavailable: {e}")
+        return None
+
+
 class FreeroutingCommands:
     """Handles Freerouting autoroute operations."""
 
@@ -1031,9 +1041,22 @@ class FreeroutingCommands:
             else:
                 track_count += 1
 
+        # Track and via counts alone don't say whether the board is finished:
+        # a run that leaves a net unrouted reports success just the same.
+        unrouted = _unrouted_connection_count(self.board)
+        if unrouted is None:
+            routed_note = ""
+        elif unrouted == 0:
+            routed_note = " — all connections routed"
+        else:
+            routed_note = (
+                f" — {unrouted} connection(s) still unrouted; "
+                "run run_drc or get_ratsnest to see which"
+            )
+
         response: Dict[str, Any] = {
             "success": True,
-            "message": f"Autoroute completed in {elapsed}s",
+            "message": f"Autoroute completed in {elapsed}s{routed_note}",
             "mode": mode_label,
             # Artifacts are staged in a temp dir and removed after the run
             # (#249); with keepArtifacts=true they are copied next to the
@@ -1049,6 +1072,7 @@ class FreeroutingCommands:
             "board_stats": {
                 "tracks": track_count,
                 "vias": via_count,
+                "unrouted_connections": unrouted,
             },
             "netClasses": netclass_report,
             "freerouting_stdout": best_proc_stdout[:1000],
