@@ -887,36 +887,47 @@ edit_schematic_component and set its value to an empty string.`,
   // Get pin locations for a schematic component
   server.tool(
     "get_schematic_pin_locations",
-    "Returns the exact x/y coordinates of every pin on a schematic component. Use this before add_schematic_net_label to place labels correctly on pin endpoints.",
+    "Returns the exact x/y coordinates of every pin on one or more schematic components. Pass reference for one part or references for several in one call. Use this before drawing wires or placing labels on pin endpoints.",
     {
       schematicPath: z.string().describe("Path to the schematic file"),
-      reference: z.string().describe("Component reference designator (e.g. U1, R1, J2)"),
+      reference: z.string().optional().describe("Component reference designator (e.g. U1, R1, J2)"),
+      references: z
+        .array(z.string())
+        .optional()
+        .describe("Several references at once (e.g. ['U1','R1','C1'])"),
     },
-    async (args: { schematicPath: string; reference: string }) => {
+    async (args: { schematicPath: string; reference?: string; references?: string[] }) => {
       const result = await callKicadScript("get_schematic_pin_locations", args);
-      if (result.success && result.pins) {
-        const lines = Object.entries(result.pins as Record<string, any>).map(
+      const fmt = (pins: Record<string, any>) =>
+        Object.entries(pins).map(
           ([pinNum, data]: [string, any]) =>
             `  Pin ${pinNum} (${data.name || pinNum}): x=${data.x}, y=${data.y}, angle=${data.angle ?? 0}°`,
         );
+      if (result.success && result.components) {
+        const blocks = Object.entries(result.components as Record<string, any>).map(
+          ([ref, pins]) => `Pin locations for ${ref}:\n${fmt(pins).join("\n")}`,
+        );
+        if (result.missing?.length) blocks.push(`Not found: ${result.missing.join(", ")}`);
+        return { content: [{ type: "text", text: blocks.join("\n") }] };
+      }
+      if (result.success && result.pins) {
         return {
           content: [
             {
               type: "text",
-              text: `Pin locations for ${args.reference}:\n${lines.join("\n")}`,
-            },
-          ],
-        };
-      } else {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Failed to get pin locations: ${result.message || "Unknown error"}`,
+              text: `Pin locations for ${args.reference}:\n${fmt(result.pins).join("\n")}`,
             },
           ],
         };
       }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Failed to get pin locations: ${result.message || "Unknown error"}`,
+          },
+        ],
+      };
     },
   );
 

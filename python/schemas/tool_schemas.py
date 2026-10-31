@@ -2646,7 +2646,7 @@ SCHEMATIC_TOOLS = [
     {
         "name": "get_schematic_pin_locations",
         "title": "Get Schematic Pin Locations",
-        "description": "Returns the exact absolute coordinates of all pins on a schematic component. Use this BEFORE placing net labels with add_schematic_net_label to get the correct x/y position for each pin endpoint.",
+        "description": "Returns the exact absolute coordinates of all pins on one or more schematic components (reference or references). Use this BEFORE placing net labels with add_schematic_net_label to get the correct x/y position for each pin endpoint.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2658,8 +2658,13 @@ SCHEMATIC_TOOLS = [
                     "type": "string",
                     "description": "Component reference designator (e.g., U1, R1, J2)",
                 },
+                "references": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Several references at once (e.g., ['U1','R1','C1']); the reply then has components: {ref: pins} and missing: [...]",
+                },
             },
-            "required": ["schematicPath", "reference"],
+            "required": ["schematicPath"],
         },
     },
     {

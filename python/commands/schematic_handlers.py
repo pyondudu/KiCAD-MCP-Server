@@ -1681,42 +1681,60 @@ class SchematicHandlersMixin:
 
             schematic_path = params.get("schematicPath")
             reference = params.get("reference")
+            references = params.get("references") or []
 
-            if not all([schematic_path, reference]):
+            if not schematic_path or not (reference or references):
                 return {
                     "success": False,
-                    "message": "Missing required parameters: schematicPath, reference",
+                    "message": "Missing required parameters: schematicPath and reference (or references)",
                 }
 
             locator = PinLocator()
-            all_pins = locator.get_all_symbol_pins(Path(schematic_path), reference)
+            sch = Path(schematic_path)
 
-            if not all_pins:
+            def pins_of(ref: str) -> Dict[str, Any]:
+                all_pins = locator.get_all_symbol_pins(sch, ref)
+                if not all_pins:
+                    return {}
+                # Enrich with pin names and angles from the symbol definition
+                pins_def = (
+                    locator.get_symbol_pins(sch, locator._get_lib_id(sch, ref))
+                    if hasattr(locator, "_get_lib_id")
+                    else {}
+                )
+                out = {}
+                for pin_num, coords in all_pins.items():
+                    entry = {"x": coords[0], "y": coords[1]}
+                    if pin_num in pins_def:
+                        entry["name"] = pins_def[pin_num].get("name", pin_num)
+                        entry["angle"] = locator.get_pin_angle(sch, ref, pin_num) or 0
+                    out[pin_num] = entry
+                return out
+
+            if references:
+                # Several parts in one call: wiring a circuit needed one call
+                # per component just to learn where its pins are.
+                components: Dict[str, Any] = {}
+                missing: List[str] = []
+                for ref in dict.fromkeys(([reference] if reference else []) + list(references)):
+                    pins = pins_of(ref)
+                    if pins:
+                        components[ref] = pins
+                    else:
+                        missing.append(ref)
+                return {
+                    "success": bool(components),
+                    "components": components,
+                    "missing": missing,
+                    **({} if components else {"message": f"No pins found for {missing}"}),
+                }
+
+            result = pins_of(reference)
+            if not result:
                 return {
                     "success": False,
                     "message": f"No pins found for {reference} — check reference and schematic path",
                 }
-
-            # Enrich with pin names and angles from the symbol definition
-            pins_def = (
-                locator.get_symbol_pins(
-                    Path(schematic_path),
-                    locator._get_lib_id(Path(schematic_path), reference),
-                )
-                if hasattr(locator, "_get_lib_id")
-                else {}
-            )
-
-            result = {}
-            for pin_num, coords in all_pins.items():
-                entry = {"x": coords[0], "y": coords[1]}
-                if pin_num in pins_def:
-                    entry["name"] = pins_def[pin_num].get("name", pin_num)
-                    entry["angle"] = (
-                        locator.get_pin_angle(Path(schematic_path), reference, pin_num) or 0
-                    )
-                result[pin_num] = entry
-
             return {"success": True, "reference": reference, "pins": result}
 
         except Exception as e:
