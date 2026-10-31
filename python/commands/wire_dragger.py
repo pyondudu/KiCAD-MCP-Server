@@ -240,7 +240,10 @@ class WireDragger:
             ry = -ry  # SYM_MIRROR_X negates screen-Y
         if mirror_y:
             rx = -rx  # SYM_MIRROR_Y negates screen-X
-        return sym_x + rx, sym_y + ry
+        # Schematic internal units are 100 nm, so 4 decimals is exact. Without
+        # rounding, float noise (80.00999999999999) reaches tool replies and is
+        # written verbatim into wires snapped to the pin.
+        return round(sym_x + rx, 4) + 0.0, round(sym_y + ry, 4) + 0.0
 
     @staticmethod
     def compute_pin_positions(
