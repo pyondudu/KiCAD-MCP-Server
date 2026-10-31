@@ -270,6 +270,30 @@ class TestBatchAddUnits:
         )
         assert calls == [("R", 1, "R1")]
 
+    def test_mirror_is_applied_through_the_rotate_handler(self, monkeypatch, tmp_path):
+        calls = []
+        sch = self._stub_loader(monkeypatch, tmp_path, calls)
+        rotated = []
+
+        def rotate(params):
+            rotated.append(params)
+            return {"success": True}
+
+        c = SchematicBatchCommands(types.SimpleNamespace(_handle_rotate_schematic_component=rotate))
+        r = c.batch_add_components(
+            {
+                "schematicPath": str(sch),
+                "components": [
+                    {"symbol": "Connector_Generic:Conn_01x02", "reference": "J1", "mirror": "y"},
+                    {"symbol": "Device:R", "reference": "R1", "rotation": 90},
+                ],
+            }
+        )
+        assert len(rotated) == 1, "only the mirrored part is re-transformed"
+        assert rotated[0]["reference"] == "J1" and rotated[0]["mirror"] == "y"
+        assert rotated[0]["angle"] == 0 and rotated[0]["autoplaceFields"] is False
+        assert r["added"][0]["mirror"] == "y" and "mirror" not in r["added"][1]
+
 
 class TestBatchAddAndConnect:
     def test_splits_nets_and_orchestrates(self):

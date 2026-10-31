@@ -22,6 +22,12 @@ export function registerSchematicBatchTools(server: McpServer, callKicadScript: 
             footprint: z.string().optional(),
             position: z.object({ x: z.number(), y: z.number() }).optional(),
             rotation: z.number().optional(),
+            mirror: z
+              .enum(["x", "y"])
+              .optional()
+              .describe(
+                "Mirror after rotating: 'y' flips left-right (a connector's pins then face right), 'x' flips up-down",
+              ),
             includePins: z.boolean().optional(),
             unit: z
               .number()
@@ -47,7 +53,32 @@ export function registerSchematicBatchTools(server: McpServer, callKicadScript: 
       if (r.success === false && r.message)
         return { content: [{ type: "text", text: `Failed: ${r.message}` }] };
       const lines = [`Added ${r.added_count} component(s), ${r.error_count} error(s).`];
+      const xy = (p: any) => (p ? `(${p.x}, ${p.y})` : "?");
+      const box = (b: any) => (b ? `[${b.x_min}, ${b.y_min}]–[${b.x_max}, ${b.y_max}]` : "?");
+      for (const a of r.added || []) {
+        // Body extent matters for layout: an IC body can reach far past its
+        // pins, and only this tells the caller before it draws over it.
+        const unit = a.unit && a.unit !== 1 ? ` unit ${a.unit}` : "";
+        const mirror = a.mirror ? ` mirror ${a.mirror}` : "";
+        lines.push(
+          `  ${a.reference}${unit} at ${xy(a.snapped_position)}${mirror} body ${box(a.body_bbox)}`,
+        );
+        if (a.footprint_warning) lines.push(`    ⚠ ${a.footprint_warning}`);
+        if (a.mirror_error) lines.push(`    ⚠ mirror: ${a.mirror_error}`);
+        if (a.pins_error) lines.push(`    ⚠ ${a.pins_error}`);
+        if (a.pins)
+          lines.push(
+            "    pins: " +
+              Object.entries(a.pins)
+                .map(
+                  ([n, p]: [string, any]) =>
+                    `${n}${p.name && p.name !== n ? "/" + p.name : ""}=${xy(p)}`,
+                )
+                .join(" "),
+          );
+      }
       for (const e of r.errors || []) lines.push(`  ✗ ${e.reference} (${e.symbol}): ${e.error}`);
+      if (r.placement_bbox) lines.push(`placement_bbox ${box(r.placement_bbox)}`);
       return { content: [{ type: "text", text: lines.join("\n") }] };
     },
   );

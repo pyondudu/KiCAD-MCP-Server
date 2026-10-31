@@ -310,6 +310,37 @@ def autoplace_fields(
     return block
 
 
+def symbol_extent(block_text: str, raw_content: str) -> Optional[Dict[str, float]]:
+    """World bbox of one placed symbol unit: body graphics plus its own pin tips.
+
+    The pin spread alone misses bodies that reach past the pins (an ATtiny85's
+    body runs 12.7 mm left of its pins) and, for a multi-unit part, spans every
+    unit placed under the same reference. None when the symbol cannot be read.
+    """
+    try:
+        sym = sexpdata.loads(block_text)
+    except Exception:
+        return None
+    lib_id_node, at = _first(sym, "lib_id"), _first(sym, "at")
+    if not lib_id_node or not at:
+        return None
+    cx, cy = float(at[1]), float(at[2])
+    rot = float(at[3]) if len(at) > 3 else 0.0
+    mirror = _first(sym, "mirror")
+    mx = bool(mirror and str(mirror[1]) == "x")
+    my = bool(mirror and str(mirror[1]) == "y")
+    unit_node = _first(sym, "unit")
+    unit = int(unit_node[1]) if unit_node else 1
+    lib_sym = _lib_symbol(raw_content, str(lib_id_node[1]))
+    if lib_sym is None:
+        return None
+    pts = _graphics_points(lib_sym, unit) + _unit_pins(lib_sym, unit)
+    box = _bbox([WireDragger.pin_world_xy(x, y, cx, cy, rot, mx, my) for x, y in pts])
+    if box is None:
+        return None
+    return {"x_min": _r(box[0]), "y_min": _r(box[1]), "x_max": _r(box[2]), "y_max": _r(box[3])}
+
+
 def autoplace_reference_fields(
     schematic_path: Any, reference: str, unit: Optional[int] = None
 ) -> bool:

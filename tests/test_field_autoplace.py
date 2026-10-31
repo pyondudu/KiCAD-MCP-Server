@@ -206,3 +206,16 @@ def test_power_unit_fields_clear_the_pin_names():
     b = autoplace_fields(block, LIB_IC + block + "\n)", {})
     # pin line at x = 71.12; pin names are drawn just right of it
     assert _pos(b, "Reference")["x"] >= 71.12 + 2.54
+
+
+def test_symbol_extent_covers_body_and_only_this_units_pins():
+    from commands.field_autoplace import symbol_extent
+
+    ne = _placed("Timer:NE555D", "U1", "NE555D", 101.6, 88.9, 0)
+    box = symbol_extent(ne, LIB_IC + ne + "\n)")
+    assert box == {"x_min": 88.9, "y_min": 78.74, "x_max": 114.3, "y_max": 99.06}
+
+    c = _placed_unit("Amplifier_Operational:LM358", "U1", "LM358", 73.66, 124.46, 3)
+    box = symbol_extent(c, LIB_IC + c + "\n)")
+    assert box["x_min"] == box["x_max"] == 71.12, "power unit: just its two pins"
+    assert (box["y_min"], box["y_max"]) == (116.84, 132.08)

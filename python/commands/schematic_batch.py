@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from commands.dynamic_symbol_loader import DynamicSymbolLoader
-from commands.field_autoplace import autoplace_fields
+from commands.field_autoplace import autoplace_fields, symbol_extent
 from commands.pin_locator import PinLocator
 from commands.schematic_text_utils import (
     _extract_property_position,
@@ -115,6 +115,7 @@ class SchematicBatchCommands:
                 # so an FPGA split into five units had to go in one call per unit
                 # — exactly the round-trips the batch exists to avoid.
                 unit = int(comp.get("unit", 1) or 1)
+                mirror = comp.get("mirror")
 
                 try:
                     loader.add_component(
@@ -138,6 +139,25 @@ class SchematicBatchCommands:
                         "snapped_position": {"x": _snap(x), "y": _snap(y)},
                     }
                     entry.update(instance_report(loader.placed_instances))
+
+                    if mirror in ("x", "y"):
+                        # Connectors usually need their pins facing the other
+                        # way; without this every one cost a separate
+                        # rotate_schematic_component call.
+                        mres = self.iface._handle_rotate_schematic_component(
+                            {
+                                "schematicPath": str(schematic_file),
+                                "reference": reference,
+                                "angle": rotation,
+                                "mirror": mirror,
+                                "unit": unit,
+                                "autoplaceFields": False,
+                            }
+                        )
+                        if mres.get("success"):
+                            entry["mirror"] = mirror
+                        else:
+                            entry["mirror_error"] = mres.get("message", "mirror failed")
 
                     if footprint and self.iface.footprint_library.find_footprint(footprint) is None:
                         entry["footprint_warning"] = (
@@ -188,7 +208,12 @@ class SchematicBatchCommands:
                                 "Use get_schematic_pin_locations as a follow-up if needed."
                             )
 
-                    entry["body_bbox"] = _bbox_from_pins(all_pins, _snap(x), _snap(y))
+                    extent = (
+                        symbol_extent(block_text, schematic_file.read_text(encoding="utf-8"))
+                        if block_text
+                        else None
+                    )
+                    entry["body_bbox"] = extent or _bbox_from_pins(all_pins, _snap(x), _snap(y))
                     results.append(entry)
 
                 except Exception as e:
