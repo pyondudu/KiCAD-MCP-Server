@@ -589,6 +589,40 @@ edit_schematic_component and set its value to an empty string.`,
     },
   );
 
+  // Draw many wires in one call
+  server.tool(
+    "add_schematic_wires",
+    "Draw many wires in one call: 'wires' is a list of waypoint lists, each like add_schematic_wire's waypoints ([[x1,y1],[x2,y2],...]). Pins are located once; each wire's first and last points snap to the nearest pin within snapTolerance. Endpoints are checked after every wire is written, so an endpoint that lands on another wire (a T or corner, even one drawn later in the same call) or on a label is connected, not floating. Reports per wire what snapped and only genuinely floating endpoints. Prefer this over many add_schematic_wire calls.",
+    {
+      schematicPath: z.string().describe("Path to the .kicad_sch file"),
+      wires: z
+        .array(z.array(z.array(z.number()).length(2)).min(2))
+        .min(1)
+        .describe("List of wires; each wire is an ordered list of [x, y] waypoints (2 or more)"),
+      snapToPins: z
+        .boolean()
+        .optional()
+        .describe("Snap each wire's first and last waypoint to the nearest pin (default: true)"),
+      snapTolerance: z.number().optional().describe("Maximum snap distance in mm (default: 1.0)"),
+    },
+    async (args: any) => {
+      const r = await callKicadScript("add_schematic_wires", args);
+      if (r.success === false && !r.wires)
+        return {
+          content: [
+            { type: "text" as const, text: `Failed to add wires: ${r.message || "Unknown error"}` },
+          ],
+        };
+      const lines = [r.message];
+      for (const w of r.wires || []) {
+        const head = `  #${w.index}${w.snapped?.length ? " snapped " + w.snapped.join(", ") : ""}`;
+        if (!w.success) lines.push(`${head} ✗ ${w.error}`);
+        else if (w.warnings?.length) lines.push(`${head} ⚠ ${w.warnings.join("; ")}`);
+      }
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    },
+  );
+
   // Add net label
   server.tool(
     "add_schematic_net_label",

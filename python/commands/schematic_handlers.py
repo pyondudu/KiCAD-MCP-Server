@@ -1165,80 +1165,10 @@ class SchematicHandlersMixin:
             # nothing used to be silent, so a wire drawn from a miscalculated
             # pin position was reported as a success while floating next to
             # the pin it was meant for (#404).
-            snapped_info: List[str] = []
-            warnings: List[str] = []
-            endpoints: Dict[str, Dict[str, Any]] = {
-                "start": {"position": list(points[0]), "snapped": False},
-                "end": {"position": list(points[-1]), "snapped": False},
-            }
-            if snap_to_pins:
-                from commands.pin_locator import PinLocator
-
-                locator = PinLocator()
-                sch_path = Path(schematic_path)
-
-                # Load schematic via the guarded loader so a parse failure
-                # surfaces a diagnosed SchematicLoadError instead of a crash.
-                sch = SchematicManager.load_schematic(str(sch_path))
-
-                # Collect all pin locations: list of (ref, pin_num, [x, y])
-                all_pins = []
-                for symbol in sch.symbol:
-                    if not hasattr(symbol.property, "Reference"):
-                        continue
-                    ref = symbol.property.Reference.value
-                    if ref.startswith("_TEMPLATE"):
-                        continue
-                    pin_locs = locator.get_all_symbol_pins(sch_path, ref)
-                    for pin_num, coords in pin_locs.items():
-                        all_pins.append((ref, pin_num, coords))
-
-                def find_nearest_pin(point: Any) -> Any:
-                    """Return (ref, pin_num, coords, distance) of the closest pin."""
-                    best = None
-                    for ref, pin_num, coords in all_pins:
-                        dx = point[0] - coords[0]
-                        dy = point[1] - coords[1]
-                        dist = (dx * dx + dy * dy) ** 0.5
-                        if best is None or dist < best[3]:
-                            best = (ref, pin_num, coords, dist)
-                    return best
-
-                for label, index in (("start", 0), ("end", -1)):
-                    requested = points[index]
-                    info = endpoints[label]
-                    match = find_nearest_pin(requested)
-                    if match is None:
-                        warnings.append(
-                            f"{label} point [{requested[0]}, {requested[1]}] was not snapped: "
-                            "the schematic has no symbol pins"
-                        )
-                        continue
-                    ref, pin_num, coords, dist = match
-                    info["nearestPin"] = {
-                        "reference": ref,
-                        "pin": pin_num,
-                        "position": [coords[0], coords[1]],
-                    }
-                    info["nearestPinDistance"] = round(dist, 4)
-                    if dist <= snap_tolerance:
-                        logger.info(
-                            f"Snapped {label} point {requested} -> {coords} ({ref}/{pin_num})"
-                        )
-                        snapped_info.append(
-                            f"{label} snapped to {ref}/{pin_num} at [{coords[0]}, {coords[1]}]"
-                        )
-                        points[index] = list(coords)
-                        info["position"] = list(coords)
-                        info["snapped"] = True
-                    else:
-                        warnings.append(
-                            f"{label} point [{requested[0]}, {requested[1]}] is {dist:.2f} mm from "
-                            f"the nearest pin {ref}/{pin_num} at [{coords[0]}, {coords[1]}], "
-                            f"outside snapTolerance {snap_tolerance} mm; the endpoint was left "
-                            "where it was and the wire may be floating"
-                        )
-
+            all_pins = self._schematic_pin_list(schematic_path) if snap_to_pins else []
+            endpoints, snapped_info, unsnapped = self._snap_wire_endpoints(
+                points, all_pins, snap_tolerance, snap_to_pins
+            )
             # Extract wire properties
             stroke_width = properties.get("stroke_width", 0)
             stroke_type = properties.get("stroke_type", "default")
@@ -1261,6 +1191,12 @@ class SchematicHandlersMixin:
                 )
 
             if success:
+                # An endpoint away from every pin is fine when it lands on
+                # another wire or a label (a T or a corner). Only the rest may
+                # be floating -- or joined by a wire drawn later.
+                warnings = self._floating_endpoint_warnings(
+                    schematic_path, unsnapped, snap_tolerance, later_hint=True
+                )
                 message = "Wire added successfully"
                 if snapped_info:
                     message += "; " + "; ".join(snapped_info)
@@ -1289,6 +1225,220 @@ class SchematicHandlersMixin:
                 "message": str(e),
                 "errorDetails": traceback.format_exc(),
             }
+
+    def _handle_add_schematic_wires(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Draw many wires in one call (same snapping rules as add_schematic_wire).
+
+        A small regulator schematic took 21 add_schematic_wire calls. Here the
+        pins are located once, every wire is written, and only then are the
+        endpoints checked -- so a T drawn in two wires is not reported as
+        floating just because its second half came later.
+        """
+        logger.info("Adding wires to schematic")
+        try:
+            from commands.wire_manager import WireManager
+
+            schematic_path = params.get("schematicPath")
+            wires = params.get("wires") or []
+            snap_to_pins = params.get("snapToPins", True)
+            snap_tolerance = params.get("snapTolerance", 1.0)
+            if not schematic_path:
+                return {"success": False, "message": "Schematic path is required"}
+            if not wires:
+                return {"success": False, "message": "wires must be a non-empty list"}
+
+            all_pins = self._schematic_pin_list(schematic_path) if snap_to_pins else []
+            results: List[Dict[str, Any]] = []
+            pending: List[Tuple[int, List[Tuple[str, List[float], Any]]]] = []
+            for i, wire in enumerate(wires):
+                pts = wire.get("waypoints") if isinstance(wire, dict) else wire
+                if not pts or len(pts) < 2:
+                    results.append({"index": i, "success": False, "error": "needs 2+ waypoints"})
+                    continue
+                pts = [list(p) for p in pts]
+                endpoints, snapped_info, unsnapped = self._snap_wire_endpoints(
+                    pts, all_pins, snap_tolerance, snap_to_pins
+                )
+                if len(pts) == 2:
+                    ok = WireManager.add_wire(Path(schematic_path), pts[0], pts[1])
+                else:
+                    ok = WireManager.add_polyline_wire(Path(schematic_path), pts)
+                entry: Dict[str, Any] = {"index": i, "success": bool(ok), "points": pts}
+                if snapped_info:
+                    entry["snapped"] = [
+                        s.split(" snapped to ")[1].split(" at ")[0] for s in snapped_info
+                    ]
+                if not ok:
+                    entry["error"] = "WireManager could not add the wire"
+                results.append(entry)
+                if ok:
+                    pending.append((i, unsnapped))
+
+            by_index = {r["index"]: r for r in results}
+            floating = 0
+            for i, unsnapped in pending:
+                warnings = self._floating_endpoint_warnings(
+                    schematic_path, unsnapped, snap_tolerance
+                )
+                if warnings:
+                    by_index[i]["warnings"] = warnings
+                    floating += len(warnings)
+
+            self._reload_kicad_schematic()
+            added = sum(1 for r in results if r["success"])
+            failed = len(results) - added
+            return {
+                "success": failed == 0,
+                "message": (
+                    f"Added {added} wire(s)"
+                    + (f", {failed} failed" if failed else "")
+                    + (f", {floating} floating endpoint(s)" if floating else "")
+                ),
+                "added_count": added,
+                "failed_count": failed,
+                "floating_endpoints": floating,
+                "wires": results,
+            }
+        except SchematicLoadError as e:
+            return e.to_response()
+        except Exception as e:
+            logger.error(f"Error adding wires to schematic: {str(e)}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+            return {
+                "success": False,
+                "message": str(e),
+                "errorDetails": traceback.format_exc(),
+            }
+
+    @staticmethod
+    def _schematic_pin_list(schematic_path: str) -> List[Tuple[str, str, List[float]]]:
+        """Every placed pin as ``(reference, pin, [x, y])``."""
+        from commands.pin_locator import PinLocator
+
+        locator = PinLocator()
+        sch_path = Path(schematic_path)
+        # Guarded loader: a parse failure surfaces a diagnosed
+        # SchematicLoadError instead of a crash.
+        sch = SchematicManager.load_schematic(str(sch_path))
+        all_pins: List[Tuple[str, str, List[float]]] = []
+        for symbol in sch.symbol:
+            if not hasattr(symbol.property, "Reference"):
+                continue
+            ref = symbol.property.Reference.value
+            if ref.startswith("_TEMPLATE"):
+                continue
+            for pin_num, coords in locator.get_all_symbol_pins(sch_path, ref).items():
+                all_pins.append((ref, pin_num, coords))
+        return all_pins
+
+    @staticmethod
+    def _snap_wire_endpoints(
+        points: List[List[float]],
+        all_pins: List[Tuple[str, str, List[float]]],
+        snap_tolerance: float,
+        snap_to_pins: bool,
+    ) -> Tuple[Dict[str, Dict[str, Any]], List[str], List[Tuple[str, List[float], Any]]]:
+        """Snap the first/last waypoint (in place) to the nearest pin.
+
+        Returns ``(endpoints, snapped_info, unsnapped)`` where ``unsnapped``
+        lists ``(label, point, nearest_pin_or_None)`` for endpoints left
+        where they were.
+        """
+        endpoints: Dict[str, Dict[str, Any]] = {
+            "start": {"position": list(points[0]), "snapped": False},
+            "end": {"position": list(points[-1]), "snapped": False},
+        }
+        snapped_info: List[str] = []
+        unsnapped: List[Tuple[str, List[float], Any]] = []
+        if not snap_to_pins:
+            return endpoints, snapped_info, unsnapped
+        for label, index in (("start", 0), ("end", -1)):
+            requested = points[index]
+            info = endpoints[label]
+            best = None
+            for ref, pin_num, coords in all_pins:
+                dist = ((requested[0] - coords[0]) ** 2 + (requested[1] - coords[1]) ** 2) ** 0.5
+                if best is None or dist < best[3]:
+                    best = (ref, pin_num, coords, dist)
+            if best is None:
+                unsnapped.append((label, list(requested), None))
+                continue
+            ref, pin_num, coords, dist = best
+            info["nearestPin"] = {
+                "reference": ref,
+                "pin": pin_num,
+                "position": [coords[0], coords[1]],
+            }
+            info["nearestPinDistance"] = round(dist, 4)
+            if dist <= snap_tolerance:
+                logger.info(f"Snapped {label} point {requested} -> {coords} ({ref}/{pin_num})")
+                snapped_info.append(
+                    f"{label} snapped to {ref}/{pin_num} at [{coords[0]}, {coords[1]}]"
+                )
+                points[index] = list(coords)
+                info["position"] = list(coords)
+                info["snapped"] = True
+            else:
+                unsnapped.append((label, list(requested), best))
+        return endpoints, snapped_info, unsnapped
+
+    @staticmethod
+    def _floating_endpoint_warnings(
+        schematic_path: str,
+        unsnapped: List[Tuple[str, List[float], Any]],
+        snap_tolerance: float,
+        later_hint: bool = False,
+    ) -> List[str]:
+        """Warnings for unsnapped endpoints that touch nothing but their own wire.
+
+        Reads the schematic as written, so the wire just added counts once at
+        its own endpoint: an endpoint touched by a second wire segment (at its
+        end or along it) or sitting on a label anchor is connected.
+        """
+        if not unsnapped:
+            return []
+        from commands.schematic_analysis import _load_sexp, _parse_labels, _parse_wires
+
+        try:
+            data = _load_sexp(Path(schematic_path))
+            wires = _parse_wires(data)
+            labels = [(lb["x"], lb["y"]) for lb in _parse_labels(data)]
+        except Exception:
+            wires, labels = [], []
+
+        def touches(seg: Dict[str, Any], x: float, y: float) -> bool:
+            (x1, y1), (x2, y2) = seg["start"], seg["end"]
+            dx, dy = x2 - x1, y2 - y1
+            length2 = dx * dx + dy * dy
+            if length2 == 0:
+                return abs(x - x1) < 1e-3 and abs(y - y1) < 1e-3
+            t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length2))
+            return abs(x - (x1 + t * dx)) < 1e-3 and abs(y - (y1 + t * dy)) < 1e-3
+
+        warnings = []
+        for label, (x, y), best in unsnapped:
+            on_wires = sum(1 for w in wires if touches(w, x, y))
+            on_label = any(abs(x - lx) < 1e-3 and abs(y - ly) < 1e-3 for lx, ly in labels)
+            if on_wires >= 2 or on_label:
+                continue
+            if best is None:
+                text = (
+                    f"{label} point [{x}, {y}] touches no wire or label, and the "
+                    "schematic has no symbol pins"
+                )
+            else:
+                ref, pin_num, coords, dist = best
+                text = (
+                    f"{label} point [{x}, {y}] touches no wire or label and is {dist:.2f} mm "
+                    f"from the nearest pin {ref}/{pin_num} at [{coords[0]}, {coords[1]}] "
+                    f"(outside snapTolerance {snap_tolerance} mm)"
+                )
+            if later_hint:
+                text += "; it floats unless a wire drawn later ends there"
+            warnings.append(text)
+        return warnings
 
     def _handle_list_schematic_libraries(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """List available symbol libraries"""

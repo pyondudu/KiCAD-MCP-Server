@@ -696,6 +696,7 @@ class KiCADInterface(SchematicHandlersMixin):
             "remove_schematic_component_property": self._handle_remove_schematic_component_property,
             "get_schematic_component": self._handle_get_schematic_component,
             "add_schematic_wire": self._handle_add_schematic_wire,
+            "add_schematic_wires": self._handle_add_schematic_wires,
             "add_schematic_net_label": self._handle_add_schematic_net_label,
             "add_no_connect": self._handle_add_no_connect,
             "connect_to_net": self._handle_connect_to_net,
