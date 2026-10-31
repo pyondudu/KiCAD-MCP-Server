@@ -159,6 +159,22 @@ def _svg_to_png(svg_path: str, width: int, height: int) -> Optional[bytes]:
     return None
 
 
+def _skipped_footprint_warning(skipped: List[Dict[str, str]]) -> Optional[str]:
+    """One line naming every part sync could not put on the board.
+
+    A wrong footprint name left the main IC off the board while the reply
+    still said success; the skip sat in footprints_skipped where it was easy
+    to miss.
+    """
+    if not skipped:
+        return None
+    parts = ", ".join(
+        f"{s.get('reference', '?')} ({s.get('reason') or s.get('footprint') or 'skipped'})"
+        for s in skipped
+    )
+    return f"{len(skipped)} part(s) NOT placed on the board: {parts}"
+
+
 class SchematicHandlersMixin:
     """Schematic-domain handlers mixed into KiCADInterface."""
 
@@ -3483,6 +3499,10 @@ class SchematicHandlersMixin:
                     "unchanged: " + ", ".join(unmatched)
                 )
                 logger.warning("sync_schematic_to_board: " + warnings[-1])
+            skip_warning = _skipped_footprint_warning(skipped_footprints)
+            if skip_warning:
+                warnings.append(skip_warning)
+                logger.warning("sync_schematic_to_board: " + skip_warning)
             root_dir = Path(schematic_path).parent
             sheet_names = []
             for p in sheets_scanned:
@@ -3495,6 +3515,7 @@ class SchematicHandlersMixin:
                 "message": (
                     f"PCB updated from schematic: {len(added_footprints)} footprints added, "
                     f"{len(added_nets)} nets added, {assigned_pads} pads assigned"
+                    + (f" — WARNING: {skip_warning}" if skip_warning else "")
                 ),
                 "sheets_scanned": sheet_names,
                 "net_source": net_source,
