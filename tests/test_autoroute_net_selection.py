@@ -218,3 +218,19 @@ def test_left_out_nets_copper_becomes_keepouts():
 def test_no_left_out_wiring_leaves_the_structure_alone():
     out, removed = filter_dsn_nets(WIRED, net_selector([], []))
     assert removed == [] and out == WIRED
+
+
+def test_multi_point_wire_becomes_one_keepout_per_segment():
+    # Freerouting 2.4.1 reads a path keepout of three or more points as a polygon. The
+    # collinear wire below (seen on a real SOT-223 tab) has no area, so it was skipped
+    # as "degenerate" and the router was free to cross it.
+    dsn = WIRED.replace(
+        "(wire (path F.Cu 250  1000 -2000  5000 -2000)",
+        "(wire (path F.Cu 250  1000 -2000  1000 -1984  1000 -200)",
+    )
+    out, _ = filter_dsn_nets(dsn, net_selector(["/MODULE*"], []))
+    structure = out[out.index("(structure") : out.index("(library")]
+    assert '(keepout "" (path F.Cu 250 1000 -2000  1000 -1984))' in structure
+    assert '(keepout "" (path F.Cu 250 1000 -1984  1000 -200))' in structure
+    assert "1000 -2000  1000 -1984  1000 -200" not in structure
+    assert out.count("(") == out.count(")")

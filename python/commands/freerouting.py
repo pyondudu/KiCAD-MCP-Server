@@ -184,6 +184,14 @@ def net_selector(route_nets: Iterable[str], exclude_nets: Iterable[str]):
     return keep
 
 
+def _same_file(a: str, b: str) -> bool:
+    """True when two paths name the same file (resolving links and relative parts)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.realpath(a) == os.path.realpath(b)
+
+
 def filter_dsn_nets(dsn_text: str, keep) -> Tuple[str, List[str]]:
     """Drop the nets ``keep`` rejects from a Specctra DSN's (network) section.
 
@@ -287,10 +295,17 @@ def _wiring_of_removed_nets_as_keepouts(dsn_text: str, removed) -> str:
             path = re.search(r"\(path\s+(" + DSN_NAME + r")\s+([\d.]+)\s+([^()]*)\)", child)
             via = re.match(r"\(via\s+(" + DSN_NAME + r")\s+([-\d.]+)\s+([-\d.]+)", child)
             if path:
-                keepouts.append(
-                    f'    (keepout "" (path {path.group(1)} {path.group(2)} '
-                    f"{path.group(3).strip()}))"
-                )
+                # One keepout per segment. Freerouting reads a path keepout of
+                # three or more points as a polygon: a straight run of collinear
+                # points has no area, so the whole keepout was skipped as
+                # "degenerate" and the router could cross that wire.
+                nums = path.group(3).split()
+                pts = list(zip(nums[0::2], nums[1::2]))
+                for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+                    keepouts.append(
+                        f'    (keepout "" (path {path.group(1)} {path.group(2)} '
+                        f"{x1} {y1}  {x2} {y2}))"
+                    )
             elif via and dsn_unquote(via.group(1)) in diam:
                 d = diam[dsn_unquote(via.group(1))]
                 for layer in layers:
@@ -1070,14 +1085,28 @@ class FreeroutingCommands:
             }
 
         board_path = params.get("boardPath")
+        loaded_path = self.board.GetFileName()
         if not board_path:
-            board_path = self.board.GetFileName()
+            board_path = loaded_path
 
         if not board_path:
             return {
                 "success": False,
                 "message": "No board file path available",
                 "errorDetails": ("Provide boardPath or open a project first"),
+            }
+
+        # The router works on the loaded board and saves it to board_path. A
+        # boardPath naming another file would be overwritten with the loaded
+        # board's copper, so refuse instead of routing the wrong board.
+        if loaded_path and not _same_file(board_path, loaded_path):
+            return {
+                "success": False,
+                "message": "boardPath is not the loaded board",
+                "errorDetails": (
+                    f"autoroute routes the loaded board ({loaded_path}) and saves it. "
+                    f"Open {board_path} with open_board first, then call autoroute."
+                ),
             }
 
         jar_path = params.get("freeroutingJar", DEFAULT_FREEROUTING_JAR)
