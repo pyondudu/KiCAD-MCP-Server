@@ -139,8 +139,11 @@ class FootprintCreator:
         lines.append(f'    (uuid "{_new_uuid()}")')
         lines.append(f"    (effects (font (size 1 1) (thickness 0.15)))")
         lines.append(f"  )")
+        # Hidden, as in KiCad's own footprints. A visible Datasheet field prints
+        # the symbol's datasheet URL across the board once sync fills it in.
         lines.append(f'  (property "Datasheet" "" (at 0 0 0)')
         lines.append(f'    (layer "F.Fab")')
+        lines.append(f"    (hide yes)")
         lines.append(f'    (uuid "{_new_uuid()}")')
         lines.append(f"    (effects (font (size 1 1) (thickness 0.15)))")
         lines.append(f"  )")
