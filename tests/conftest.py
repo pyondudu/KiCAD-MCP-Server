@@ -12,6 +12,8 @@ import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 # Make the repository's Python package tree importable in a clean checkout.
 # Individual test modules must not depend on the caller's PYTHONPATH or on an
 # editable install that CI does not perform.
@@ -31,8 +33,51 @@ os.environ.setdefault("KICAD_SKIP_SYMBOL_WARMUP", "1")
 # attribute access (pcbnew.BOARD, pcbnew.PCB_TRACK, …) returns a mock
 # rather than raising AttributeError.
 # ---------------------------------------------------------------------------
-if os.environ.get("KICAD_USE_REAL_PCBNEW") != "1":
-    _pcbnew = MagicMock(name="pcbnew")
+
+
+class _ModuleStub(MagicMock):
+    """MagicMock that also keeps its child mocks in the instance ``__dict__``.
+
+    Since pytest 9.2, ``monkeypatch.setattr`` saves the old value only from the
+    instance ``__dict__``. A plain MagicMock keeps child mocks in
+    ``_mock_children``, so ``undo()`` deleted the patched name instead of
+    restoring it, and the stub then raised AttributeError for that name in
+    every later test.
+    """
+
+    def __getattr__(self, name: str):
+        child = super().__getattr__(name)
+        self.__dict__[name] = child
+        return child
+
+
+_REAL_KICAD = os.environ.get("KICAD_USE_REAL_PCBNEW") == "1"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_kicad_config(monkeypatch):
+    """Tests never read or write the real KiCad configuration.
+
+    The library readers and the table editor look for KiCad's global tables
+    under ``KICAD_CONFIG_HOME``, ``APPDATA`` and ``XDG_CONFIG_HOME`` before the
+    home directory, so a test that only patches ``Path.home`` would still find
+    the developer's real tables through those variables. Clear them for every
+    test; a test that needs one sets it itself with ``monkeypatch.setenv``.
+
+    Left alone in real-KiCad mode: there pcbnew and the ``kicad-cli``
+    subprocesses need the configuration those variables point at (a user-space
+    install keeps it under ``KICAD_CONFIG_HOME``), and dropping the variable
+    would send them to the user's real ``~/.config/kicad`` instead. The tests
+    that read tables in that mode isolate themselves locally.
+    """
+    if _REAL_KICAD:
+        return
+    for var in ("KICAD_CONFIG_HOME", "APPDATA", "XDG_CONFIG_HOME"):
+        monkeypatch.delenv(var, raising=False)
+
+
+if not _REAL_KICAD:
+    _pcbnew = _ModuleStub(name="pcbnew")
     _pcbnew.__file__ = "/fake/pcbnew.cpython-313-x86_64-linux-gnu.so"
     _pcbnew.__name__ = "pcbnew"
     _pcbnew.__spec__ = None

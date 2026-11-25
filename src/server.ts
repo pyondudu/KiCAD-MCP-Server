@@ -42,6 +42,7 @@ import {
   ToolboxManager,
   TOOLBOXES_ENV,
 } from "./tools/toolboxes.js";
+import { OPERATING_MODE_ENV, parseOperatingMode } from "./tools/operating-mode.js";
 import { registerGuiDriverTools } from "./tools/gui-driver.js";
 
 // Import resource registration functions
@@ -317,7 +318,7 @@ export class KiCADMcpServer {
     // Initialize the MCP server
     this.server = new McpServer({
       name: "kicad-mcp-server",
-      version: "2.8.3",
+      version: "2.9.0",
       description: "MCP server for KiCAD PCB design operations",
     });
     // Create the ready promise (resolved when Python sends {"type":"ready"})
@@ -339,9 +340,17 @@ export class KiCADMcpServer {
 
     // Toolboxes decide which registered tools a client sees (toolboxes.ts). The
     // manager has to see every registration, so it wraps the server first.
+    const operatingMode = parseOperatingMode(process.env[OPERATING_MODE_ENV]);
+    if (operatingMode.unrecognised !== undefined) {
+      logger.error(
+        `${OPERATING_MODE_ENV}=${operatingMode.unrecognised} is not a mode ` +
+          `(write, readonly, manufacturing); using readonly`,
+      );
+    }
     this.toolboxes = new ToolboxManager(
       this.server,
       parseToolboxSetting(process.env[TOOLBOXES_ENV]),
+      operatingMode.mode,
     );
     this.toolboxes.captureRegistrations();
     if (this.toolboxes.setting.mode === "toolboxes" && this.toolboxes.setting.unknown.length > 0) {
@@ -379,7 +388,6 @@ export class KiCADMcpServer {
     registerEagleTools(this.server, this.callKicadScript.bind(this));
     registerPcbImportTools(this.server, this.callKicadScript.bind(this));
     registerValidationTools(this.server, this.callKicadScript.bind(this));
-
     // Register all resources
     registerProjectResources(this.server, this.callKicadScript.bind(this));
     registerBoardResources(this.server, this.callKicadScript.bind(this));
@@ -392,6 +400,7 @@ export class KiCADMcpServer {
     registerDesignPrompts(this.server);
     registerFootprintPrompts(this.server);
 
+    this.toolboxes.annotateReadOnly();
     this.toolboxes.applyVisibility();
     logger.info("All KiCAD tools, resources, and prompts registered");
     logger.info(this.toolboxes.describe());

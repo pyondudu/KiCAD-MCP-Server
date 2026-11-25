@@ -15,8 +15,12 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from commands.library_tables import global_table_path, no_global_table_message
-from utils.sexpr_format import escape_sexpr_string
+from commands.library_tables import (
+    global_table_path,
+    no_global_table_message,
+    project_library_uri,
+)
+from utils.sexpr_format import escape_sexpr_string, match_paren, paren_delta
 
 logger = logging.getLogger("kicad_interface")
 
@@ -263,13 +267,13 @@ class FootprintCreator:
                 # Detect start of target pad
                 if re.match(rf'\(pad\s+"{re.escape(pad_number)}"\s+', stripped):
                     in_target_pad = True
-                    pad_depth = stripped.count("(") - stripped.count(")")
+                    pad_depth = paren_delta(stripped)
                     pad_block_lines = [line]
                 else:
                     result_lines.append(line)
             else:
                 pad_block_lines.append(line)
-                pad_depth += stripped.count("(") - stripped.count(")")
+                pad_depth += paren_delta(stripped)
                 if pad_depth <= 0:
                     # End of pad block – patch and flush
                     block = "\n".join(pad_block_lines)
@@ -303,21 +307,10 @@ class FootprintCreator:
             start = text.find("(model", idx)
             if start == -1:
                 break
-            depth = 0
-            i = start
-            end = -1
-            while i < len(text):
-                c = text[i]
-                if c == "(":
-                    depth += 1
-                elif c == ")":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-                i += 1
-            if end == -1:
+            close = match_paren(text, start)
+            if close == -1:
                 break
+            end = close + 1
             blk = text[start:end]
             fm = re.search(r'\(model\s+"?([^")\s]+)"?', blk)
             blocks.append(
@@ -584,6 +577,8 @@ class FootprintCreator:
                 # Default: same directory as the .pretty library
                 table_dir = pretty.parent
             table_path = table_dir / "fp-lib-table"
+            # Portable like KiCad's own entries: ${KIPRJMOD}/... when inside the project.
+            uri = project_library_uri(pretty, table_dir)
         else:  # global
             # The newest KiCad's own table (#425): only 9.0 used to be searched,
             # and with none there a 9.0 table was created, which KiCad 10 never
@@ -607,7 +602,8 @@ class FootprintCreator:
             content = "(fp_lib_table\n  (version 7)\n)\n"
 
         # Check if already registered (by name OR by uri)
-        if f'(name "{name}")' in content or uri in content:
+        absolute_uri = str(pretty).replace("\\", "/")
+        if f'(name "{name}")' in content or uri in content or absolute_uri in content:
             return {
                 "success": True,
                 "already_registered": True,

@@ -2,6 +2,7 @@
 Design rules command implementations for KiCAD interface
 """
 
+import json
 import logging
 import math
 import os
@@ -285,6 +286,133 @@ class DesignRuleCommands:
                 "errorDetails": str(e),
             }
 
+    def set_voltage_clearance_rules(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Clearance/creepage rules graded by working voltage between net classes.
+
+        See ``utils.voltage_rules`` for the model and the KiCad behaviours it
+        relies on. Writes a managed block at the end of the board's
+        ``.kicad_dru``. A re-run replaces that block and leaves every other
+        rule untouched.
+        """
+        from utils.voltage_rules import (
+            VoltageRuleError,
+            plan_rules,
+            render_block,
+            unsupported_kicad_message,
+            write_rules,
+        )
+
+        try:
+            # KiCad 8 has neither the creepage constraint nor hasNetclass(), and
+            # it drops a .kicad_dru it cannot parse as a whole: writing the
+            # block there would silently switch off the user's own rules too.
+            try:
+                build_version = pcbnew.GetBuildVersion()
+            except Exception:
+                build_version = None
+            unsupported = unsupported_kicad_message(build_version)
+            if unsupported:
+                return {
+                    "success": False,
+                    "message": "KiCad version not supported",
+                    "errorDetails": unsupported,
+                    "kicadVersion": str(build_version),
+                }
+
+            board_path = params.get("boardPath")
+            if not board_path and self.board:
+                try:
+                    board_path = self.board.GetFileName()
+                except Exception:
+                    board_path = None
+            dru_path = resolve_dru_path(board_path)
+            if not dru_path:
+                return {
+                    "success": False,
+                    "message": "No board file",
+                    "errorDetails": "Pass boardPath (a .kicad_pcb) or load a board that has been saved",
+                }
+
+            classes = params.get("classes") or []
+            other = params.get("otherNetsVoltage", 0)
+            try:
+                plan = plan_rules(classes, params.get("spacing") or [], params.get("pairs"), other)
+                names = [c["name"] for c in classes]
+                block = render_block(
+                    plan, names, exclude_unconnected=bool(params.get("excludeUnconnectedNets"))
+                )
+            except VoltageRuleError as exc:
+                return {
+                    "success": False,
+                    "message": "Invalid voltage rules",
+                    "errorDetails": str(exc),
+                }
+
+            # A rule naming a class the project doesn't define matches nothing,
+            # and KiCad doesn't report it. Say so.
+            warnings: List[str] = []
+            pro_path = os.path.splitext(board_path)[0] + ".kicad_pro"
+            defined: Optional[set] = None
+            try:
+                with open(pro_path, "r", encoding="utf-8") as f:
+                    pro = json.load(f)
+                defined = {c.get("name") for c in pro.get("net_settings", {}).get("classes", [])}
+            except (OSError, ValueError):
+                warnings.append(f"Could not read {pro_path} to check the class names")
+            if defined is not None:
+                missing = [n for n in names if n not in defined]
+                if missing:
+                    warnings.append(
+                        "Not defined in the project, so their rules match nothing until they "
+                        f"are created (create_netclass): {', '.join(missing)}"
+                    )
+
+            # kicad-cli 10.0.8 DRC crashes (SIGSEGV, no report) when a creepage
+            # rule is active on a board with no Edge.Cuts outline.
+            if any("creepage" in e for e in plan):
+                try:
+                    with open(board_path, "r", encoding="utf-8") as f:
+                        has_outline = '(layer "Edge.Cuts")' in f.read()
+                except OSError:
+                    has_outline = True  # can't tell; don't warn on a guess
+                if not has_outline:
+                    warnings.append(
+                        "The board has no Edge.Cuts outline. Creepage is measured along the "
+                        "board, and kicad-cli DRC 10.0.8 crashes (SIGSEGV) on a creepage rule "
+                        "without one. Add the outline before running DRC."
+                    )
+
+            if params.get("dryRun"):
+                return {
+                    "success": True,
+                    "message": f"{len(plan)} rules planned (dry run, nothing written)",
+                    "rules": plan,
+                    "druText": block,
+                    "warnings": warnings,
+                }
+            try:
+                written = write_rules(dru_path, block)
+            except VoltageRuleError as exc:
+                return {"success": False, "message": "Rules not written", "errorDetails": str(exc)}
+
+            return {
+                "success": True,
+                "message": (
+                    f"Wrote {len(plan)} voltage rules to {written['druFile']}; "
+                    "they apply from the next DRC run"
+                ),
+                "druFile": written["druFile"],
+                "rules": plan,
+                "warnings": warnings,
+            }
+        except Exception as e:
+            logger.error(f"Error setting voltage rules: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to set voltage rules",
+                "errorDetails": str(e),
+            }
+
     def assign_net_to_class(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Assign an existing net to an existing net class.
 
@@ -389,6 +517,44 @@ class DesignRuleCommands:
                 "message": "Failed to assign net to class",
                 "errorDetails": str(e),
             }
+
+    def audit_via_nets(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare every via's net in the saved board with a reference board.
+
+        ``reference`` is a board file or a git revision of the same file
+        (``HEAD``, ``HEAD~1``, a sha). The board compared is the file on disk,
+        because the failure this catches happens on save. See
+        ``utils/via_audit.py``.
+        """
+        from utils.via_audit import audit_via_nets
+
+        try:
+            reference = params.get("reference")
+            if not reference:
+                return {
+                    "success": False,
+                    "message": "Failed: reference is required (a board file or a git revision)",
+                }
+            board_path = params.get("boardPath")
+            note = None
+            if not board_path:
+                if not self.board or not self.board.GetFileName():
+                    return {
+                        "success": False,
+                        "message": "Failed: no boardPath given and no saved board is loaded",
+                    }
+                board_path = self.board.GetFileName()
+                note = (
+                    "Compared the board file on disk; unsaved edits to the loaded board "
+                    "are not included. Save first to audit them."
+                )
+            result = audit_via_nets(board_path, str(reference))
+            if note and result.get("success"):
+                result["note"] = note
+            return result
+        except Exception as e:
+            logger.error(f"Error auditing via nets: {e}")
+            return {"success": False, "message": "Failed to audit via nets", "errorDetails": str(e)}
 
     def check_clearance(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Check the measured clearance between two PCB items against the board's
@@ -581,8 +747,14 @@ class DesignRuleCommands:
                     json_output,
                     "--units",
                     "mm",
-                    board_file,
                 ]
+                refill_requested = bool(params.get("refillZones", True))
+                refill_supported = (
+                    self._cli_supports_refill(kicad_cli) if refill_requested else False
+                )
+                drc_flags = self._drc_flags(params, refill_supported)
+                cmd += drc_flags
+                cmd.append(board_file)
 
                 logger.info(f"Running DRC command (timeout={timeout_sec}s): {' '.join(cmd)}")
 
@@ -595,52 +767,45 @@ class DesignRuleCommands:
                 )
 
                 if result.returncode != 0:
-                    logger.error(f"DRC command failed: {result.stderr}")
+                    details = self._cli_error_details(result)
+                    logger.error(f"DRC command failed: {details}")
                     return {
                         "success": False,
                         "message": "DRC command failed",
-                        "errorDetails": result.stderr,
+                        "errorDetails": details,
                     }
+
+                notes = []
+                warnings = []
+                zones_refilled = refill_requested and refill_supported
+                if zones_refilled:
+                    notes.append(
+                        "Zones were refilled for this check only; the refilled copper was not "
+                        "saved. Exports plot the saved fills, so run refill_zones and save the "
+                        "board before exporting."
+                    )
+                elif refill_requested:
+                    notes.append(
+                        "This kicad-cli has no --refill-zones (it arrived in KiCad 10), so DRC "
+                        "checked the zone fills saved in the board file."
+                    )
+                if params.get("schematicParity", False):
+                    sch = os.path.splitext(board_file)[0] + ".kicad_sch"
+                    out = (result.stdout or "") + (result.stderr or "")
+                    if "Failed to fetch schematic netlist" in out or not os.path.exists(sch):
+                        warnings.append(
+                            "Schematic parity did not run: kicad-cli could not load the "
+                            f"schematic ({os.path.basename(sch)} next to the board). Zero parity "
+                            "issues here does not mean board and schematic agree."
+                        )
 
                 # Read JSON output
                 with open(json_output, "r", encoding="utf-8") as f:
                     drc_data = json.load(f)
 
-                # Parse violations from kicad-cli output
-                violations = []
-                violation_counts: dict[str, int] = {}
-                severity_counts = {"error": 0, "warning": 0, "info": 0}
-
-                for violation in drc_data.get("violations", []):
-                    vtype = violation.get("type", "unknown")
-                    vseverity = violation.get("severity", "error")
-
-                    # Extract location from first item's pos (kicad-cli JSON format)
-                    items = violation.get("items", [])
-                    loc_x, loc_y = 0, 0
-                    if items and "pos" in items[0]:
-                        loc_x = items[0]["pos"].get("x", 0)
-                        loc_y = items[0]["pos"].get("y", 0)
-
-                    violations.append(
-                        {
-                            "type": vtype,
-                            "severity": vseverity,
-                            "message": violation.get("description", ""),
-                            "location": {
-                                "x": loc_x,
-                                "y": loc_y,
-                                "unit": "mm",
-                            },
-                        }
-                    )
-
-                    # Count violations by type
-                    violation_counts[vtype] = violation_counts.get(vtype, 0) + 1
-
-                    # Count by severity
-                    if vseverity in severity_counts:
-                        severity_counts[vseverity] += 1
+                violations, violation_counts, severity_counts, category_counts = (
+                    self._parse_drc_report(drc_data)
+                )
 
                 # Determine where to save the violations file
                 board_dir = os.path.dirname(board_file)
@@ -656,6 +821,7 @@ class DesignRuleCommands:
                             "total_violations": len(violations),
                             "violation_counts": violation_counts,
                             "severity_counts": severity_counts,
+                            "category_counts": category_counts,
                             "violations": violations,
                         },
                         f,
@@ -675,6 +841,7 @@ class DesignRuleCommands:
                         report_path,
                         "--units",
                         "mm",
+                        *drc_flags,
                         board_file,
                     ]
                     subprocess.run(cmd_report, capture_output=True, timeout=timeout_sec)
@@ -687,7 +854,11 @@ class DesignRuleCommands:
                         "total": len(violations),
                         "by_severity": severity_counts,
                         "by_type": violation_counts,
+                        "by_category": category_counts,
                     },
+                    "zonesRefilled": zones_refilled,
+                    "notes": notes,
+                    "warnings": warnings,
                     "violationsFile": violations_file,
                     "reportPath": report_path if report_path else None,
                 }
@@ -714,6 +885,102 @@ class DesignRuleCommands:
                 "message": "Failed to run DRC",
                 "errorDetails": str(e),
             }
+
+    # kicad-cli's JSON report keeps three lists. Only "violations" was read before, so a
+    # board with missing connections or schematic mismatches reported none of them.
+    DRC_REPORT_CATEGORIES = ("violations", "unconnected_items", "schematic_parity")
+
+    _refill_support: Dict[str, bool] = {}
+
+    @classmethod
+    def _cli_supports_refill(cls, kicad_cli: str) -> bool:
+        """Whether this kicad-cli's ``pcb drc`` has ``--refill-zones`` (KiCad 10+), cached per path."""
+        if kicad_cli not in cls._refill_support:
+            import subprocess
+
+            try:
+                h = subprocess.run(
+                    [kicad_cli, "pcb", "drc", "--help"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                cls._refill_support[kicad_cli] = "--refill-zones" in (h.stdout or "") + (
+                    h.stderr or ""
+                )
+            except Exception:
+                cls._refill_support[kicad_cli] = False
+        return cls._refill_support[kicad_cli]
+
+    @staticmethod
+    def _cli_error_details(result) -> str:
+        """kicad-cli prints argument errors on stdout; return stderr, or stdout's tail when empty."""
+        err = (result.stderr or "").strip()
+        if err:
+            return err
+        return "\n".join((result.stdout or "").strip().splitlines()[-20:])
+
+    @staticmethod
+    def _drc_flags(params: Dict[str, Any], refill_supported: bool = True) -> list:
+        """kicad-cli flags from run_drc params.
+
+        ``refillZones`` (default True) matches the DRC dialog's default "Refill all zones
+        before performing DRC". Without it a board whose fills are stale reports clearance
+        errors against copper that a refill would move, and misses ones it would create.
+        It is only passed when this kicad-cli supports it (KiCad 10+).
+        ``schematicParity`` (default False) adds the schematic-vs-board check; it needs the
+        project's schematic next to the board.
+        """
+        flags = []
+        if params.get("refillZones", True) and refill_supported:
+            flags.append("--refill-zones")
+        if params.get("schematicParity", False):
+            flags.append("--schematic-parity")
+        return flags
+
+    @classmethod
+    def _parse_drc_report(cls, drc_data: Dict[str, Any]):
+        """Flatten a kicad-cli DRC JSON report.
+
+        Returns (violations, counts_by_type, counts_by_severity, counts_by_category). Each
+        violation keeps its ``category`` and the ``items`` it names (description, uuid, pos),
+        so a caller can tell WHAT is shorted or unconnected, not only where.
+        """
+        violations = []
+        violation_counts: Dict[str, int] = {}
+        severity_counts = {"error": 0, "warning": 0, "info": 0}
+        category_counts: Dict[str, int] = {}
+        for category in cls.DRC_REPORT_CATEGORIES:
+            for violation in drc_data.get(category, []) or []:
+                vtype = violation.get("type", "unknown")
+                vseverity = violation.get("severity", "error")
+                items = violation.get("items", []) or []
+                loc_x, loc_y = 0, 0
+                if items and "pos" in items[0]:
+                    loc_x = items[0]["pos"].get("x", 0)
+                    loc_y = items[0]["pos"].get("y", 0)
+                violations.append(
+                    {
+                        "type": vtype,
+                        "severity": vseverity,
+                        "category": category,
+                        "message": violation.get("description", ""),
+                        "location": {"x": loc_x, "y": loc_y, "unit": "mm"},
+                        "items": [
+                            {
+                                "description": it.get("description", ""),
+                                "uuid": it.get("uuid"),
+                                "pos": it.get("pos"),
+                            }
+                            for it in items
+                        ],
+                    }
+                )
+                violation_counts[vtype] = violation_counts.get(vtype, 0) + 1
+                if vseverity in severity_counts:
+                    severity_counts[vseverity] += 1
+                category_counts[category] = category_counts.get(category, 0) + 1
+        return violations, violation_counts, severity_counts, category_counts
 
     def _find_kicad_cli(self) -> Optional[str]:
         """Find kicad-cli executable via the centralized resolver.

@@ -4,8 +4,348 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-11
+
+### New MCP Prompt
+
+- `pdn_dc_review` — Checklist for a DC power-distribution review using
+  `get_stackup`, `summarize_vias`, `summarize_net_copper`, `query_traces`, and
+  `query_zones`. It does not ask for a copper solve or an impedance curve this
+  server cannot produce. Target impedance is the allowed ripple divided by the
+  load's transient step.
+- `emc_shield_review` — Checklist for a shield review from the board geometry
+  (`get_component_list`, `get_stackup`, `summarize_vias`). It does not assume a
+  near-field solver. A caller may paste a comparison; the prompt does not
+  invent one.
+
+### New Tools
+
+- **`set_voltage_clearance_rules`** (#490, @dp-web4) — clearance and creepage rules graded by
+  the working voltage between net classes, written as a managed block at the
+  end of the board's `.kicad_dru` (a re-run replaces the block; hand-written
+  rules stay). Each class gets its potential against a shared reference, a
+  number for a fixed node or `[min, max]` for one that swings; the working
+  voltage of a pair is the largest difference their ranges can show, and
+  `pairs` sets it directly for classes in separate domains. The `spacing`
+  table (working voltage to clearance and optional creepage) comes from the
+  user's standard; the tool supplies no values, refuses a table whose spacing
+  falls as voltage rises or that drops creepage in a higher row, and refuses a
+  working voltage above the table's last row. The write is refused when the
+  rest of the `.kicad_dru` does not parse, because KiCad silently ignores
+  every rule in a file it cannot parse. `excludeUnconnectedNets` (default
+  off) leaves KiCad's `unconnected-(...)` nets out of the "other nets" rules.
+  Needs KiCad 9 or newer (`creepage`, `hasNetclass()`); on KiCad 8 the tool
+  refuses and writes nothing.
+
+- **`get_stackup`** (#457, #462, @karu2003) reads the stackup from the saved
+  board file: every copper, dielectric, mask and silk row with its thickness in
+  millimetres, a thickness locked in the stackup editor, and the board's own
+  layer names beside the canonical ones. Pass `expected` to compare the rows
+  with a recipe in the same call (tolerances 0.001 mm and 0.01 for
+  permittivity by default).
+- **`set_stackup_layer`** (#461, @karu2003) sets one stackup row's thickness,
+  and for a dielectric its material, relative permittivity and loss tangent.
+  The row is named by index or layer name, and only the fields passed change.
+- **`summarize_vias`** (#458, @karu2003) counts vias without listing them: the
+  total, how many run F.Cu to B.Cu, a drill histogram and the layer spans,
+  filtered by net, rectangle, drill or layer. A stitched ground net can hold
+  thousands of vias, too many to list in a reply.
+- **`summarize_net_copper`** (#460, @karu2003) summarizes one net's copper
+  without listing it: the track, via and zone counts, the layers, the bounding
+  box, and a shape (`vias_only`, `tracks_only`, `zones_only`, `empty` or
+  `mixed`). An unknown net is an error rather than an empty result.
+
+### New Features
+
+- **`audit_via_nets`: compare every via's net with a reference board**
+  (#493, @dp-web4). KiCad can change a via's net when it saves a board, with
+  no error. DRC doesn't flag it, because the board stays self-consistent,
+  just wrong. Seen on KiCad 10 on a real board: a via inside a zone of
+  another net took the zone's net, and after an autorouter import a GND via
+  came back on ISENSE_ADC and two VBAT vias came back as GND. The reliable
+  check is a via-by-via comparison with a known-good version.
+  - The reference is a `.kicad_pcb` file or a git revision of the same file
+    (`HEAD`, `HEAD~1`, a sha). The board compared is the saved file, since
+    the change happens on save. A revision is resolved to a commit with
+    `git rev-parse --verify --end-of-options` before anything is read, and
+    one starting with `-` is refused, so the tool never hands git an option
+    (`--output=X` would have made `git show` write a file).
+  - Vias are matched by UUID, then by position and layer pair, since an
+    import can give vias new UUIDs.
+  - The reply lists each via whose net changed (position, layers, old and
+    new net, how it was matched), plus a count per transition such as
+    `"VBAT -> GND": 2`, and the vias added, removed and moved.
+  - Read-only, so it is available in `readonly` mode.
+- **`autoroute` can route a chosen set of nets** (`routeNets`, `excludeNets`,
+  names or globs such as `/HV PWR/*`). Freerouting routes every net in the
+  DSN; the selection is applied to the DSN copy, so nets left out keep their
+  pads and copper on the board as obstacles but get no routing. That lets an
+  isolated high-voltage board be routed one domain at a time (pack-side nets
+  inside their region, then the logic nets) and leaves high-current nets for
+  hand-drawn pours. The left-out nets' existing tracks, arcs and vias become
+  keepouts in the DSN (Freerouting drops the wires of nets it does not know)
+  and are locked for the session import, which KiCad keeps locked tracks
+  through, so routing in passes keeps the earlier passes with the same
+  objects, UUIDs and groups. The reply lists `netsLeftOut`.
+- **`autoroute` keeps tracks off plane layers: `signalLayers` and
+  `layerTraceCosts`.** KiCad exports every copper layer as `(type signal)`,
+  so Freerouting ran tracks across the inner planes of a 4-layer board and cut
+  one into seven islands. `signalLayers` (e.g. `["F.Cu", "In2.Cu", "B.Cu"]`)
+  marks the other copper layers `(active off)` in a Freerouting rules file
+  passed with `-dr`: no tracks there, vias still pass through.
+  `layerTraceCosts` (e.g. `{"In1.Cu": 5}`) keeps a layer usable but prices
+  tracks on it, for a plane that may carry the odd track where nothing else
+  fits. Names may be canonical or the board's own (a renamed F.Cu is found
+  either way, since the DSN uses the board's names); a name the board lacks
+  is refused rather than ignored. The file holds only what was asked for, so
+  Freerouting's own per-layer defaults stay in force elsewhere. The reply
+  lists the restricted layers by the board's names in `tracksKeptOffLayers`.
+  A board-sized wire keepout was tried first and is the wrong tool: Freerouting
+  then places no vias at all (0 vias, 111 unrouted against fanout escaping
+  244/304 pins on the same DSN).
+
+- **Operating modes: a readonly mode for review agents, and a manufacturing
+  mode** (#443 and #444, @b0gdaniy). `KICAD_MCP_OPERATING_MODE=readonly`
+  leaves only the tools that cannot change the design, the project, libraries
+  or KiCad's settings, nor drive its GUI. `manufacturing` adds the export
+  tools. Unset, or `write`, nothing changes.
+  - The mode names and the idea are from #443. The implementation differs in
+    two ways. Each read-only tool is on an explicit list, checked against its
+    handler, instead of being picked out by a `get_`/`list_`/`find_` name
+    prefix, so a new tool stays hidden until someone reviews it. And
+    disallowed tools are removed from the tool list through the same switch
+    toolboxes use, instead of being listed and then refused.
+  - A value the server doesn't recognise counts as `readonly`.
+  - The mode combines with `KICAD_MCP_TOOLBOXES`, and read-only tools carry
+    MCP's `readOnlyHint` annotation in every mode.
+
+- **`get_component_list` filters by region** (#459, @karu2003).
+  `boundingBox` keeps the footprints whose anchor lies inside a rectangle;
+  `matchPadCenter` also keeps one when any pad centre is inside, and
+  `includePads` adds each pad's number, net and position.
+
 ### Bug Fixes
 
+- **`autoroute`, `import_ses` and `refill_zones` no longer make the next
+  auto-save refuse.** All three write the board file themselves but did not
+  record that write, so the session still held the file's signature from
+  before the command. The auto-save after the next board edit (and
+  `refill_zones`' own) then found the file changed, reported "the on-disk PCB
+  file's contents changed externally", and left the edit only in memory, as
+  it did for every later edit until the project was reopened. They now record
+  the file after a successful save of the session's own board. A save that
+  fails, or that goes to a different file, records nothing, so a real external
+  edit is still refused.
+
+- **A sheet with exactly one hierarchical label no longer breaks board
+  creation.** kicad-skip returns a collection for two or more hierarchical
+  labels (or no-connects), but the bare element when there is exactly one.
+  `getattr(sch, kind, None) or []` then raised "`__bool__` should return bool,
+  returned str", so `create_board_from_schematic` and
+  `sync_schematic_to_board` failed on such a project. Iterating the bare
+  element would also have walked its children instead of the items. A new
+  `utils.skip_items.skip_items(sch, kind)` always returns a list of items.
+- **`batch_connect` no longer draws diagonal wires to a "facing" label.** A pin
+  was joined by a wire to any label of its net within 14 mm whose orientation
+  was opposite its own, wherever that label was. A label 9 mm across and 10 mm
+  down got a diagonal wire, and a label behind the pin got a wire back across
+  the symbol body. A label now counts as facing only when it lies straight out
+  in front of the pin, on the pin's axis; otherwise the pin gets its own label.
+- **Library listing and search find KiCad's global tables wherever KiCad
+  keeps them, and on a fresh install.** `list_symbol_libraries`,
+  `list_libraries`, `search_symbols` and the loader behind
+  `add_schematic_component` each had their own list of `~/.config/kicad/<ver>`
+  paths, so with `KICAD_CONFIG_HOME` set (KiCad's own override, and how a
+  user-space or CI install keeps its configuration), or with `XDG_CONFIG_HOME`
+  or `%APPDATA%` elsewhere, they reported 0 libraries while
+  `list_library_table` showed the table. They now share the table editor's
+  discovery, and before KiCad has created a user table they read KiCad's
+  stock `template/sym-lib-table` and `fp-lib-table`, so the bundled libraries
+  are listed on a fresh install too. The writers still only use a table the
+  user already has. One behaviour change: the symbol loader used to read
+  every `8.0`, `9.0` and `10.0` global table it found; it now reads only the
+  newest version's table, as KiCad does, so a library registered only in an
+  older version's table has to be added to the current one.
+- **`add_via` keeps the net it was given inside another net's zone.** It
+  created a non-free via, and KiCad 10 gives a non-free via the net of the
+  copper it touches when the board is saved. A via placed inside a filled
+  zone of another net, before anything of its own net reached it, was written
+  to the file on the zone's net, while the reply named the requested one: on a
+  battery board with a plane in every cell, a CMGND via came back as the
+  cell's supply net and shorted. `add_via` now makes a free via, as KiCad's
+  Add Free-Standing Via does, and reports the net the via has.
+- **STM32 and other symbols with parentheses in pin names load again.** KiCad
+  writes a `(` inside a quoted string as is, so the stock STM32 libraries have
+  pin names like `"PA13(JTMS"`. Twenty block scanners counted every `(` and
+  `)`, including those inside strings, so a single quoted `(` threw them off
+  to the end of the file. `list_symbol_pins`, `add_schematic_component` and
+  `import_symbol` failed on every `MCU_ST_STM32H5` symbol. Once such a symbol
+  was in a schematic, adding any other symbol type failed with "No
+  lib_symbols section found". The same miscount affected datasheet
+  enrichment, library property edits, symbol removal, `replace_instance_lib_ids`,
+  sheet lookups, `add_sheet_pin`, footprint pad and 3D-model edits, the
+  footprint parser and `.kicad_dru` rule lookup. They all use the string-aware
+  `match_paren` now, plus a new `paren_delta` for the scanners that read line
+  by line. (The matcher in `schematic_handlers` was already string-aware;
+  this brings every other scanner in line with it.)
+- **Every schematic tool that takes a `position` accepts `[x, y]` and
+  `{"x": .., "y": ..}`.** `add_schematic_text`, `add_schematic_hierarchical_label`
+  and `add_sheet_pin` took a list; a dict passed their length check and then
+  failed with "Failed to add text annotation". `delete_schematic_net_label`
+  took a dict; a list raised. Either shape now works everywhere, in the MCP
+  schemas as well as the Python handlers, and a malformed one is refused with
+  a message naming both shapes. `delete_schematic_net_label` refuses a
+  position that is present but malformed instead of treating it as absent,
+  which would have deleted the only label of that name.
+- **`search_footprints` with `library` searches that library.** The filter was
+  applied after a search of every library that stopped at `limit * 10`
+  matches, so a library listed late in the table returned nothing once earlier
+  libraries had used up that budget. With the stock tables, `P2.54mm` in
+  `Connector_PinSocket_2.54mm` came back empty although the library has 278
+  matches, and a user library added after the `KiCad` row was hardly ever
+  reached. The search now scans only the requested library.
+- **`sync_schematic_to_board` and `create_board_from_schematic` take nets from
+  KiCad's own netlist.**
+  - **Before.** Pad nets came from a built-in walker that followed wires and
+    labels geometrically. It disagreed with KiCad whenever a net changed name
+    across a sheet boundary or a label sat mid-wire, and it wrote flat names
+    (`SWDIO`, not `/MCU/SWDIO`). On a real 77-part, 9-sheet board, 304 of 333
+    pads ended up on a net KiCad disagrees with, and KiCad's parity check
+    reported 349 issues, while the tool said success.
+  - **Now.** Nets come from `kicad-cli sch export netlist`, read in the
+    S-expression format because the XML writer unescapes names (`ADC7/PB6`
+    instead of KiCad's `ADC7{slash}PB6`). Each footprint is linked to its
+    symbol by path, and symbol values, fields and the BOM/DNP flags are carried
+    over, as KiCad's Update PCB does. The same board now has 0 pads that
+    disagree with KiCad and 3 parity issues, all in the design itself.
+  - **Also reported.** The reply says `netSource`. Pads that aren't pins of
+    their symbol have their net cleared (`pads_cleared`). Footprints that
+    differ from the symbol's, in name or in library, are listed in
+    `footprint_changes_pending`, not swapped; only a footprint with no
+    library nickname at all (what older versions of this tool wrote) gets
+    the symbol's nickname. New fields are created hidden on the Fab layer,
+    as KiCad does. Field values with line breaks come through intact: the
+    netlist reader maps KiCad's `\n`, `\r` and `\t` escapes back.
+  - **Fallback.** Without kicad-cli the built-in walker is still used, with a
+    warning.
+- **`autoroute` keeps every outline of a keepout.** KiCad's Specctra export
+  writes only the first outline of a rule area, so a keepout drawn as several
+  polygons reached Freerouting as one. On a real high-voltage board a keepout
+  built from many voltage halos lost all but one, and Freerouting put logic
+  vias 0.4 mm from 400 V pads that needed 1.5 mm. The missing outlines are
+  now appended to the DSN in the form KiCad writes the first (`keepout`,
+  `wire_keepout` or `via_keepout` per the area's flags). Holes are still not
+  exported, which keeps copper out rather than letting it in.
+
+- **`import_eagle_project` no longer replaces a schematic that is open in
+  KiCad.** It writes `<output_dir>/<project_name>.kicad_sch` without checking
+  whether that file exists, so re-importing into an open project overwrote it
+  the way `create_project` did before #473. It is now refused like the other
+  schematic writers. The test that keeps the guarded list current scans every
+  tool file instead of only the schematic ones, so a writer added elsewhere
+  fails it until it is guarded or listed as not writing a schematic.
+- **Saves after `sync_schematic_to_board` are no longer refused as an
+  external change.** The sync writes the board file itself but did not record
+  that write, so the auto-save that follows it, and every later one in the
+  session, reported the file as "changed externally" and kept the change in
+  memory only. `create_board_from_schematic` followed by another sync hit the
+  same refusal.
+- **`add_zone`, `export_position_file` and `export_vrml` work.** They were
+  listed and documented, but every call failed with "Unknown command". They
+  now run `add_copper_pour`, `export_pos` and `export_3d_cli` with translated
+  parameters.
+- **`add_copper_pour`** reports an unknown net as an error instead of adding a
+  zone with no net, exposes `priority`, `fillType`, `minWidth` and a new
+  `padConnection` (`thermal`/`solid`/`none`), and works over IPC: that handler
+  read `points` while the tool sends `outline`. The IPC path now applies the
+  same checks as SWIG: point units are converted to mm, an unknown net is an
+  error, and `padConnection` is written to the zone.
+- **Schematic batches no longer time out on large symbols.** Placing one STM32
+  symbol took longer than the 30 s default, and the abandoned batch left a
+  schematic that would not load. The batch schematic commands,
+  `create_board_from_schematic` and `run_erc` get the long allowance, and
+  `KICAD_MCP_COMMAND_TIMEOUT_MS` raises the floor for every command.
+
+- **A wire ending on the middle of another wire now gets its junction, and
+  keeps one it already has.** KiCad connects such a T only with a junction at
+  the meeting point. KiCad's editor splits the through-wire there, but wires
+  written by a tool usually aren't split. `sync_junctions` counted wire ends
+  only, so it added no junction (KiCad left the T open, and ERC reports
+  `unconnected_wire_endpoint`). Worse, it deleted a junction that was
+  already there, cutting a working connection. It runs on every `add_wire`,
+  `delete_wire`, move and rotate, so one edit anywhere on a sheet could
+  disconnect a T elsewhere on it.
+  - The through-wire now counts as two connections, as its halves would
+    if split.
+  - A pin sitting mid-wire is still not dotted: KiCad treats it as
+    unconnected, and a junction would change the netlist.
+  - A plain crossing is still not dotted.
+- **No-connect flags and junctions now work on hierarchical child sheets.**
+  A child sheet has no `(sheet_instances)` block. `add_no_connect` returned
+  False there ("No sheet_instances section found"), so
+  `batch_add_no_connects` failed for every pin of every part below the root
+  sheet. `sync_junctions` skipped its insert, so no junction a child sheet
+  needed was ever written, and a tool-drawn T on a child sheet stayed open.
+  Both now append at the end of the sheet, as `add_label` and `add_wire`
+  already did. KiCad's ERC confirms a no-connect placed on a child sheet
+  clears that pin's `pin_not_connected`.
+- **`find_orphaned_wires` no longer reports wires to sheet pins as orphaned.**
+  On a real 3-sheet design whose ERC shows no dangling wire, the root sheet
+  came back with 38 "orphaned" wires: every wire to a hierarchical sheet pin.
+  Pruning them, the natural next step, deleted live wires back through
+  whole nets (93 on that sheet before nothing was left to remove). Sheet pins
+  and hierarchical labels now count as connections, as does a wire end on
+  another wire's interior at a junction (KiCad connects such an unsplit T).
+  The same design now reports 0 on every sheet, matching ERC.
+
+- **`add_via` reads the parameters its schemas declare** (#407). The SWIG
+  handler indexed `position["unit"]`, so a call without the optional `unit`
+  failed with `'unit'`. JSON-RPC calls (`x`, `y`, `diameter`, `netName`) were
+  refused as `Missing position`, and the IPC handler took `x`/`y` as mm
+  whatever their unit. Both handlers now share one parameter reader: `unit`
+  defaults to mm, the JSON-RPC names are accepted, a net that does not exist
+  is reported instead of leaving the via unconnected, and a `viaType` other
+  than `through` is refused instead of quietly adding a through via.
+- **Autoroute with several attempts no longer crashes with `PermissionError`
+  on a rootful Docker engine** (#477). The best-of-N restore step copied the
+  winning SES over the existing file with `shutil.copy2`, which needs write
+  permission on that file; on a rootful Docker engine the file is still
+  owned by the container. It now writes to a sibling path and renames over
+  the existing file instead, which only needs write permission on the
+  directory.
+- **Schematic edits are refused while the schematic is open in KiCad** (#472).
+  KiCad keeps its own copy of an open schematic and does not reload it when
+  the file changes on disk, so saving there silently overwrote what the
+  schematic tools wrote. Commands that edit a schematic now ask KiCad over IPC
+  which schematic is open and refuse if it belongs to the same project. Tools
+  that write only on request (`lint_offgrid` with `fix`, `dryRun: false`,
+  `apply`) are refused only then, and previews (`dryRun`/`dry_run`) pass.
+  Every file `update_symbol_from_library` would write is checked,
+  `backannotate_footprints` without `schematicPath` checks the board's
+  schematic, and `create_schematic` and `create_project` no longer replace an
+  open schematic with an empty one. Set
+  `KICAD_ALLOW_OPEN_SCHEMATIC_EDITS=true` to allow them anyway; the opt-in
+  Windows reload (`KICAD_INTERACTIVE_SCHEMATIC`) is unaffected.
+- **`run_drc` reports unconnected items and schematic-parity issues, and
+  refills zones first on KiCad 10.** kicad-cli's JSON report keeps three
+  lists, and only `violations` was read, so missing connections
+  (`unconnected_items`) and schematic mismatches (`schematic_parity`) were
+  never reported: a board with unrouted nets could come back with no errors.
+  All three are read now, the summary counts them `by_category`, and each
+  violation in the saved file keeps its `category` and the `items` it names
+  (description, uuid, position). `get_drc_violations` uses `run_drc`, so its
+  counts now include unconnected items too.
+  - With KiCad 10 kicad-cli, DRC refills zones before checking, as the DRC
+    dialog does by default; on a 13-cell battery board with stale fills,
+    about 400 of 584 reported violations were clearance errors against old
+    fill copper. The refill is not saved: the reply says
+    `zonesRefilled: true` and notes that exports plot the saved fills.
+    `refillZones` set to false turns it off. KiCad 8 and 9 have no
+    `--refill-zones`, so there the check runs on the saved fills and says so
+    (`zonesRefilled: false`).
+  - `schematicParity` set to true adds the schematic check, with a warning
+    when kicad-cli could not load the schematic.
+  - A failed kicad-cli run reports stdout's last lines when stderr is empty.
 - **`export_svg` writes the SVG it reports** (#467). It plotted without
   opening a plot file first, the same mistake #456 fixed in `export_gerber`,
   so no file was written while the reply said success. It now writes one SVG
@@ -13,6 +353,54 @@ All notable changes to the KiCAD MCP Server project are documented here.
   is named `<board>-<name>.svg` like the PDF export. Both `export_svg` and
   `export_pdf` now take that name from KiCad and fail if the file is missing,
   instead of reporting a path nobody checked.
+- **Board tools keep working after an image render** (#479).
+  `get_board_2d_view` and the schematic view rasterize with pymupdf, which,
+  like pcbnew, is a SWIG module. On builds where both use the same SWIG
+  runtime version, they share one type table, and pymupdf loading after pcbnew
+  replaced pcbnew's iterator class. Every later loop over board drawings,
+  tracks or footprint graphics then failed with
+  `'SwigPyIterator' object has no attribute 'next'` until the server
+  restarted; `list_graphics` was the most visible casualty. If you never saw
+  that error, your build keeps the tables separate and was not affected (seen
+  with KiCad 9.0.8 from Ubuntu 26.04 and pymupdf 2.1). The server now imports
+  pymupdf before pcbnew, and both view tools re-register pcbnew's iterator
+  class after loading pymupdf, so the import order no longer matters.
+- **Prompts include the arguments you pass** (found while reviewing #470).
+  Every prompt's text marks its arguments with `{{name}}`, but no handler
+  filled them in, so the model received the literal `{{requirements}}` and the
+  user's text was dropped. All 18 prompts now substitute their arguments; an
+  optional one left out reads "(not provided)".
+
+- **`modify_trace` applies its changes on the IPC backend** (#515, @rmskkn).
+  It compared track ids in protobuf text form (`value: "..."`) with plain
+  UUIDs, so it never found the track, and it accepted only F.Cu and B.Cu. It
+  now matches on the UUID, accepts all 32 copper layers, and changes a via's
+  diameter too. `query_traces` ids now feed straight into it.
+- **Project libraries survive a move** (#488, @dp-web4).
+  `register_symbol_library` and `register_footprint_library` with
+  `scope="project"` wrote absolute paths, so a project broke when it was moved
+  or cloned. A library inside the project is now written as
+  `${KIPRJMOD}/...`, as KiCad's own library manager does. One outside it stays
+  absolute, and an existing absolute row still counts as registered.
+
+### Tooling
+
+- **CI jobs time out instead of hanging for six hours.** No job in
+  `ci.yml` set `timeout-minutes`, so GitHub's 360-minute default applied. On
+  2026-11-06 a KiCad 10 integration leg on the #505 merge train sat in the
+  KiCad PPA install step for over 25 minutes (normally under 2) until it was
+  cancelled by hand, and the required `CI passed` check stayed pending the
+  whole time. Every job now has a limit of about 3x its slowest successful run
+  on `main` (10 minutes at least; 35 for the integration tests). The KiCad
+  install step also has its own 25-minute limit, apt drops a connection that
+  sends nothing for 60 seconds and retries the file, and each apt command is
+  retried up to 3 times. A timed-out job counts as failed, so `CI passed`
+  fails with it.
+
+- **MCP SDK 1.32.1, and `npm audit` clean again** (#463, @rmskkn). Clearing
+  the remaining advisories also dropped the unused `@types/glob`
+  devDependency, whose old `@types/minimatch` broke `tsc` (the error in #15).
+- **Vitest 4** for the TypeScript tests (#512, @TimChild).
 
 ## [2.8.3] - 2026-10-25
 

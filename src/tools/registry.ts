@@ -27,11 +27,13 @@ export const toolCategories: ToolCategory[] = [
   {
     name: "board",
     description:
-      "Board configuration: layers, mounting holes, text and graphics, SVG logos, zones, visualization",
+      "Board configuration: layers, stackup, mounting holes, text and graphics, SVG logos, zones, visualization",
     tools: [
       "add_layer",
       "set_active_layer",
       "get_layer_list",
+      "get_stackup",
+      "set_stackup_layer",
       "add_mounting_hole",
       "add_board_text",
       "list_graphics",
@@ -120,7 +122,9 @@ export const toolCategories: ToolCategory[] = [
       "create_netclass",
       "assign_net_to_class",
       "set_layer_constraints",
+      "set_voltage_clearance_rules",
       "check_clearance",
+      "audit_via_nets",
       "get_drc_violations",
     ],
   },
@@ -275,6 +279,8 @@ export const toolCategories: ToolCategory[] = [
       "modify_trace",
       "delete_trace",
       "query_traces",
+      "summarize_vias",
+      "summarize_net_copper",
       "copy_routing_pattern",
       "add_via",
       "add_gnd_stitching_vias",

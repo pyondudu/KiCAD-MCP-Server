@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -181,3 +182,87 @@ def test_export_pdf_writes_the_file_it_reports(tmp_path: Path) -> None:
     pdf = Path(result["file"]["path"])
     assert pdf.name == "plot_smoke-board.pdf"
     assert pdf.read_bytes().startswith(b"%PDF")
+
+
+def test_add_via_keeps_its_net_inside_another_nets_zone(tmp_path: Path) -> None:
+    """A via placed on its own inside a zone of another net used to be written to the file on
+    the zone's net: a non-free via takes its net from the copper it touches when the board is
+    saved. add_via now makes a free via, as KiCad's Add Free-Standing Via does."""
+    import pcbnew
+    from commands.routing import RoutingCommands
+
+    board = pcbnew.BOARD()
+    for name in ("PLANE", "SIG"):
+        board.Add(pcbnew.NETINFO_ITEM(board, name))
+    zone = pcbnew.ZONE(board)
+    zone.SetLayer(pcbnew.B_Cu)
+    zone.SetNet(board.FindNet("PLANE"))
+    outline = zone.Outline()
+    outline.NewOutline()
+    for x, y in ((0, 0), (20, 0), (20, 20), (0, 20)):
+        outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    board.Add(zone)
+    # Save and reload before filling: ZONE_FILLER on a bare in-memory BOARD() segfaults on
+    # KiCad 9 (no project attached). A board on disk carries its last fill, so the via lands
+    # on filled copper, as it would on a real board.
+    seed = tmp_path / "seed.kicad_pcb"
+    pcbnew.SaveBoard(str(seed), board)
+    board = pcbnew.LoadBoard(str(seed))
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    # KiCad 9 drops nets that nothing uses when it saves; SIG has no items yet.
+    if not board.FindNet("SIG"):
+        board.Add(pcbnew.NETINFO_ITEM(board, "SIG"))
+
+    result = RoutingCommands(board).add_via(
+        {"position": {"x": 10, "y": 10, "unit": "mm"}, "net": "SIG"}
+    )
+    assert result["success"] is True, result
+    assert result["via"]["net"] == "SIG"
+
+    path = tmp_path / "via_in_zone.kicad_pcb"
+    pcbnew.SaveBoard(str(path), board)
+    reloaded = pcbnew.LoadBoard(str(path))
+    vias = [t for t in reloaded.GetTracks() if t.GetClass() == "PCB_VIA"]
+    assert len(vias) == 1
+    assert vias[0].GetNetname() == "SIG", "the via was saved on the zone's net"
+
+
+def test_run_drc_reports_unconnected_pads_with_real_kicad_cli(tmp_path: Path) -> None:
+    """Two pads on one net and no copper between them: kicad-cli lists the gap under
+    "unconnected_items", which run_drc used to drop."""
+    import pcbnew
+    from commands.design_rules import DesignRuleCommands
+
+    board = pcbnew.BOARD()
+    corners = [(0, 0), (20, 0), (20, 10), (0, 10)]
+    for start, end in zip(corners, corners[1:] + corners[:1]):
+        _add_segment(board, pcbnew.Edge_Cuts, start, end, width_mm=0.1)
+    net = pcbnew.NETINFO_ITEM(board, "SIG")
+    board.Add(net)
+    for ref, x in (("TP1", 4), ("TP2", 16)):
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(ref)
+        pad = pcbnew.PAD(fp)
+        pad.SetShape(pcbnew.PAD_SHAPE_RECT)
+        pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
+        pad.SetLayerSet(pad.SMDMask())
+        pad.SetSize(pcbnew.VECTOR2I(pcbnew.FromMM(1), pcbnew.FromMM(1)))
+        pad.SetNumber("1")
+        fp.Add(pad)
+        board.Add(fp)
+        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(5)))
+        pad.SetNet(net)
+    board_path = tmp_path / "drc_smoke.kicad_pcb"
+    pcbnew.SaveBoard(str(board_path), board)
+
+    commands = DesignRuleCommands(pcbnew.LoadBoard(str(board_path)))
+    result = commands.run_drc({})
+
+    assert result["success"] is True, result
+    assert result["summary"]["by_category"].get("unconnected_items") == 1, result
+    saved = json.loads(Path(result["violationsFile"]).read_text())
+    gap = [v for v in saved["violations"] if v["category"] == "unconnected_items"][0]
+    assert sorted(i["description"].split(" of ")[-1].split(" ")[0] for i in gap["items"]) == [
+        "TP1",
+        "TP2",
+    ]
